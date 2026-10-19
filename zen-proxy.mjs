@@ -40,17 +40,14 @@ const DEFAULT_CONFIG = {
     ENV.FALLBACK_MODELS ??
       JSON.stringify([
         "big-pickle",
-        "space-bunny-free",
         "mimo-v2.6-flash-free",
-        "muse-spark-1.3-contributor-free",
-        "muse-spark-1.2-contributor-free",
         "nemotron-3.5-lightning-free",
         "longcat-2.5-preview-free",
         "deepseek-v4.1-flash-free",
         "nemotron-3.5-super-vl-free",
-        "ll-alpha-free",
         "glm-5.3-flash-free",
         "beam-free",
+        "minimax-m3.1-flash-free",
       ]),
   ),
   modelAliases: JSON.parse(ENV.MODEL_ALIASES ?? "{}"),
