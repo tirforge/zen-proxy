@@ -48,6 +48,7 @@ const DEFAULT_CONFIG = {
         "glm-5.3-flash-free",
         "beam-free",
         "minimax-m3.1-flash-free",
+        "flint-40b-free",
       ]),
   ),
   modelAliases: JSON.parse(ENV.MODEL_ALIASES ?? "{}"),
