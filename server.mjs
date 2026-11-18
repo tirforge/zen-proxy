@@ -142,19 +142,30 @@ async function bridgeAlive() {
   }
 }
 
+const bridgeState = { up: false, lastCheck: 0, restarts: 0, lastError: null, starting: false }
+
 async function ensureBridge() {
   if (await bridgeAlive()) {
-    log(`bridge already running at ${config.bridgeUrl}`)
-    return
+    if (!bridgeState.up) log(`bridge already running at ${config.bridgeUrl}`)
+    bridgeState.up = true
+    bridgeState.lastCheck = Date.now()
+    return true
   }
+  bridgeState.up = false
+  bridgeState.lastCheck = Date.now()
   if (!config.autoStartBridge) {
     log("bridge not running and autoStartBridge is off")
-    return
+    bridgeState.lastError = "autoStartBridge is off"
+    return false
   }
+  if (bridgeState.starting) return false
+  bridgeState.starting = true
   const dir = path.isAbsolute(config.bridgeDir) ? config.bridgeDir : path.join(__dirname, config.bridgeDir)
   if (!fs.existsSync(path.join(dir, "server.js"))) {
-    log(`bridge entry missing: ${path.join(dir, "server.js")}`)
-    return
+    bridgeState.starting = false
+    bridgeState.lastError = `bridge entry missing: ${path.join(dir, "server.js")}`
+    log(bridgeState.lastError)
+    return false
   }
   const port = new URL(config.bridgeUrl).port || "20129"
   const bin = findBun()
@@ -166,15 +177,49 @@ async function ensureBridge() {
   })
   child.stdout.on("data", (d) => String(d).trim().split("\n").forEach((l) => l && log(`bridge: ${l}`)))
   child.stderr.on("data", (d) => String(d).trim().split("\n").forEach((l) => l && log(`bridge! ${l}`)))
-  child.on("exit", (code) => log(`bridge exited (${code})`))
+  child.on("exit", (code) => {
+    log(`bridge exited (${code})`)
+    bridgeState.up = false
+  })
   for (let i = 0; i < 40; i++) {
     await new Promise((r) => setTimeout(r, 500))
     if (await bridgeAlive()) {
       log("bridge is up")
-      return
+      bridgeState.up = true
+      bridgeState.starting = false
+      return true
     }
   }
-  log("bridge did not come up in 20s")
+  bridgeState.starting = false
+  bridgeState.lastError = "bridge did not come up in 20s"
+  log(bridgeState.lastError)
+  return false
+}
+
+// Keep the bridge alive without a manual restart. Runs every 15s and restarts
+// as soon as a health probe fails (with a 30s cooldown so a broken bridge
+// cannot turn into a spawn storm).
+let watchdogTimer = null
+let lastRestartAttempt = 0
+function startWatchdog() {
+  if (watchdogTimer) return
+  watchdogTimer = setInterval(async () => {
+    const up = await bridgeAlive()
+    bridgeState.lastCheck = Date.now()
+    if (up) {
+      bridgeState.up = true
+      return
+    }
+    const wasUp = bridgeState.up
+    bridgeState.up = false
+    if (!config.autoStartBridge || bridgeState.starting) return
+    if (Date.now() - lastRestartAttempt < 30000) return
+    lastRestartAttempt = Date.now()
+    log(wasUp ? "bridge stopped responding — restarting" : "bridge is down — attempting restart")
+    const ok = await ensureBridge()
+    if (ok) bridgeState.restarts++
+  }, 15000)
+  if (watchdogTimer.unref) watchdogTimer.unref()
 }
 
 // ---------------------------------------------------------------- opencode
@@ -183,8 +228,15 @@ function run(cmd, args, timeoutMs = 12000) {
   return new Promise((resolve) => {
     let out = ""
     let child
+    // spawn(..., { shell: true }) with an args array is deprecated (DEP0190).
+    // On Windows the opencode entry is a .cmd shim, so run it through cmd.exe
+    // explicitly instead of asking Node to build a shell command string.
+    const [file, argv] =
+      process.platform === "win32"
+        ? [process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", cmd, ...args]]
+        : [cmd, args]
     try {
-      child = spawn(cmd, args, { shell: process.platform === "win32", windowsHide: true })
+      child = spawn(file, argv, { windowsHide: true })
     } catch (e) {
       resolve({ out: String(e), code: -1 })
       return
@@ -281,6 +333,10 @@ async function buildStatus() {
       runtime: health?.runtime || null,
       discoveredModels: health?.discoveredModels ?? served.length,
       egress: health?.egress?.mode || null,
+      up: bridgeState.up,
+      restarts: bridgeState.restarts,
+      lastCheck: bridgeState.lastCheck || null,
+      lastError: bridgeState.lastError,
     },
   }
 }
@@ -294,7 +350,13 @@ async function proxyV1(req, res) {
   const target = config.bridgeUrl.replace(/\/$/, "") + req.url
   const started = Date.now()
   const chunks = []
-  for await (const c of req) chunks.push(c)
+  try {
+    for await (const c of req) chunks.push(c)
+  } catch {
+    // Client hung up mid-upload; nothing to proxy and no response to send.
+    log(`${req.method} ${req.url} -> client aborted during upload`)
+    return
+  }
   let body = chunks.length ? Buffer.concat(chunks) : undefined
   let model = ""
 
@@ -325,6 +387,16 @@ async function proxyV1(req, res) {
   }
 
   let status = 502
+  // Abort the upstream request when the client hangs up. Without this an
+  // abandoned stream keeps consuming quota until the bridge finishes it.
+  const abort = new AbortController()
+  let clientGone = false
+  const onClose = () => {
+    if (res.writableFinished) return
+    clientGone = true
+    abort.abort()
+  }
+  res.on("close", onClose)
   try {
     const fwdHeaders = { ...req.headers }
     // The body may have been rewritten for model routing, so a stale
@@ -336,6 +408,7 @@ async function proxyV1(req, res) {
       method: req.method,
       headers: fwdHeaders,
       body: body && req.method !== "GET" && req.method !== "HEAD" ? body : undefined,
+      signal: abort.signal,
     })
     status = upstreamRes.status
     const headers = {}
@@ -352,30 +425,54 @@ async function proxyV1(req, res) {
           if (done) break
           res.write(Buffer.from(value))
         }
-      } catch {}
+      } catch {
+        // Either the client disconnected (upstream aborted) or the bridge
+        // dropped the stream; both are already accounted for below.
+      }
     }
     res.end()
   } catch (e) {
-    if (!res.headersSent) sendJson(res, 502, { error: { type: "bridge_unreachable", message: String(e?.message || e) } })
-    else res.end()
+    if (clientGone) {
+      status = 499 // non-standard, "client closed request" — kept out of error stats
+    } else if (!res.headersSent) {
+      sendJson(res, 502, { error: { type: "bridge_unreachable", message: String(e?.message || e) } })
+    } else res.end()
   } finally {
-    const ms = Date.now() - started
-    counters.total++
-    if (status >= 400) counters.errors++
-    counters.times.push(Date.now())
-    if (counters.times.length > 5000) {
-      const cutoff = Date.now() - 5 * 60 * 1000
-      counters.times = counters.times.filter((t) => t >= cutoff)
-    }
-    recent.push({ at: Date.now(), model: model || "(none)", status, ms, count: 1 })
+    res.off("close", onClose)
+    // A stream can also end "successfully" after the client is already gone
+    // (res.write on a destroyed socket is silently dropped), so decide the
+    // recorded status here rather than in the catch block alone.
+    if (clientGone) status = 499
+    recordRequest({ model: model || "(none)", status, ms: Date.now() - started })
+    if (clientGone) log(`${req.method} ${req.url} -> client aborted after ${Date.now() - started}ms`)
+    else if (!req.url.includes("/models")) log(`${req.method} ${req.url} -> ${status} ${Date.now() - started}ms ${model}`)
+  }
+}
+
+// Collapse consecutive identical (model, status) requests into a single row
+// with a count, rather than flooding the feed with 1s.
+function recordRequest({ model, status, ms }) {
+  counters.total++
+  if (status >= 400 && status !== 499) counters.errors++
+  counters.times.push(Date.now())
+  if (counters.times.length > 5000) {
+    const cutoff = Date.now() - 5 * 60 * 1000
+    counters.times = counters.times.filter((t) => t >= cutoff)
+  }
+  const last = recent[recent.length - 1]
+  if (last && last.model === model && last.status === status && Date.now() - last.at < 10000) {
+    last.count++
+    last.at = Date.now()
+    last.ms = ms
+  } else {
+    recent.push({ at: Date.now(), model, status, ms, count: 1 })
     if (recent.length > 100) recent.shift()
-    if (!req.url.includes("/models")) log(`${req.method} ${req.url} -> ${status} ${ms}ms ${model}`)
   }
 }
 
 // ---------------------------------------------------------------- routes
 
-const server = http.createServer(async (req, res) => {
+const handleRequest = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "127.0.0.1"}`)
   const pathname = url.pathname
 
@@ -462,10 +559,7 @@ const server = http.createServer(async (req, res) => {
       const text = await r.text()
       const ms = Date.now() - started
       const gated = /FreeUsageLimitError|FreeTierError/i.test(text)
-      counters.total++
-      if (r.status >= 400) counters.errors++
-      counters.times.push(Date.now())
-      recent.push({ at: Date.now(), model, status: r.status, ms, count: 1 })
+      recordRequest({ model, status: r.status, ms })
       return sendJson(res, 200, {
         ok: r.ok,
         status: r.status,
@@ -506,11 +600,22 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname === "/api/bridge") {
     if (!isAuthorized(req)) return sendJson(res, 401, { error: "unauthorized" })
+    if (req.method === "POST") {
+      if (!sameOrigin(req)) return sendJson(res, 403, { error: "cross-origin write rejected" })
+      const ok = await ensureBridge()
+      return sendJson(res, 200, { ok, restarting: !ok, state: bridgeState })
+    }
     try {
       const h = await bridgeJson("/health")
-      return sendJson(res, 200, { ok: h.ok, url: config.bridgeUrl, panel: config.bridgeUrl + "/", health: h.json })
+      return sendJson(res, 200, {
+        ok: h.ok,
+        url: config.bridgeUrl,
+        panel: config.bridgeUrl + "/",
+        health: h.json,
+        state: bridgeState,
+      })
     } catch (e) {
-      return sendJson(res, 200, { ok: false, url: config.bridgeUrl, error: String(e?.message || e) })
+      return sendJson(res, 200, { ok: false, url: config.bridgeUrl, error: String(e?.message || e), state: bridgeState })
     }
   }
 
@@ -550,11 +655,29 @@ const server = http.createServer(async (req, res) => {
   const publicDir = path.join(__dirname, "public")
   const file = path.join(publicDir, safe)
   if (file.startsWith(publicDir + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) {
-    res.writeHead(200, { "content-type": guessType(file) })
+    // Revalidate with an ETag keyed on size + mtime so an edited asset is
+    // picked up on a normal refresh instead of a stale cached copy.
+    const st = fs.statSync(file)
+    const etag = `"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`
+    if (req.headers["if-none-match"] === etag) {
+      res.writeHead(304, { etag, "cache-control": "no-cache" })
+      return res.end()
+    }
+    res.writeHead(200, { "content-type": guessType(file), etag, "cache-control": "no-cache" })
     return res.end(fs.readFileSync(file))
   }
 
   sendJson(res, 404, { error: "not found" })
+}
+
+const server = http.createServer((req, res) => {
+  handleRequest(req, res).catch((e) => {
+    log(`request failed: ${e?.message || e}`)
+    if (!res.headersSent) sendJson(res, 500, { error: "internal error" })
+    else {
+      try { res.end() } catch {}
+    }
+  })
 })
 
 function guessType(file) {
@@ -574,7 +697,18 @@ server.listen(config.port, config.host, async () => {
   log(`zen-proxy dashboard on http://${config.host}:${config.port}`)
   log(`bridge backend ${config.bridgeUrl}`)
   await ensureBridge()
+  startWatchdog()
 })
+
+process.on("SIGTERM", () => {
+  log("shutting down")
+  server.close(() => process.exit(0))
+})
+
+// A background failure (bridge watchdog, config write, stream) must not take
+// the dashboard down with it.
+process.on("unhandledRejection", (e) => log(`unhandled rejection: ${e?.message || e}`))
+process.on("uncaughtException", (e) => log(`uncaught exception: ${e?.message || e}`))
 
 process.on("SIGINT", () => {
   log("shutting down")

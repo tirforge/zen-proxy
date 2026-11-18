@@ -51,13 +51,17 @@ Point any agent at the dashboard — not directly at the bridge:
 - **Models** — every free model the bridge discovered, one-click test, default model
 - **Settings** — default/fallback models, aliases, proxy key, bridge URL
 - **Logs** — request log tail
-- **Bridge backend card** — bridge version/runtime, egress mode, gate status
+- **Bridge backend card** — bridge version/runtime, egress mode, gate status,
+  restart count; turns red with a banner if the bridge stops answering
 - **OpenCode buttons**
   - `◱ Bridge egress panel` → the bridge's own panel (`:20129`), where the egress
     proxy/pool is configured
   - `◈ OpenCode web UI` → opens the OpenCode server URL (`opencode service status`)
   - `🔗 Pair OpenCode` → runs `opencode pair`, shows the one-time sign-in link
     (valid 5 minutes), copies it to the clipboard
+  - `↻ Restart bridge` → re-spawns the bridge immediately (the watchdog does the
+    same automatically when `/health` fails; it retries every 15s after a 30s
+    cooldown)
 
 ## Web UIs
 
@@ -82,7 +86,8 @@ Point any agent at the dashboard — not directly at the bridge:
 | `POST` | `/api/test` | `{"model":"..."}` — tiny completion |
 | `POST` | `/api/sync` | refresh model list from the bridge |
 | `GET` | `/api/logs?n=300` | log tail |
-| `GET` | `/api/bridge` | bridge `/health` passthrough |
+| `GET` | `/api/bridge` | bridge `/health` passthrough + watchdog state |
+| `POST` | `/api/bridge` | restart the bridge now |
 | `GET` | `/api/opencode/status` | OpenCode server URL |
 | `GET` | `/api/opencode/pair` | run `opencode pair`, return link |
 
@@ -142,6 +147,9 @@ from OpenCode's own catalog (`models.opencode.ai`).
 - The dashboard reports catalog models as **agent-only** rather than "ok": the
   gate only answers agent-shaped traffic, so a bare probe cannot prove a model
   works. `Test` sends a real (small) request and reports the truth.
+- **Client aborts are propagated.** If the caller disconnects, the upstream
+  bridge request is aborted too, and the feed records it as `abort` (499) instead
+  of counting it as an error.
 - Do not expose port 8787 or 20129 publicly.
 
 ## Credits

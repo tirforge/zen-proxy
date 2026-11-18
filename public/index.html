@@ -396,6 +396,7 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
         <button onclick="openBridgePanel()">◱ Bridge egress panel</button>
         <button onclick="openWebUI()">◈ OpenCode web UI</button>
         <button onclick="pairOpencode()">🔗 Pair OpenCode</button>
+        <button onclick="restartBridge()">↻ Restart bridge</button>
       </div>
       <div id="pairOut" class="hint mono" style="margin-top:14px;word-break:break-all"></div>
     </div>
@@ -560,15 +561,24 @@ async function refreshStatus() {
     if (document.getElementById("tab-overview").classList.contains("active")) renderTable(st.recent)
     const b = st.bridge || {}
     if ($("bridgeBadge")) {
-      $("bridgeBadge").className = "badge " + (st.upstreamOk ? "ok" : "bad")
-      $("bridgeBadge").textContent = b.gate ? "gate: " + b.gate : (st.upstreamOk ? "bridge up" : "bridge down")
+      const down = b.up === false || st.upstreamOk === false
+      $("bridgeBadge").className = "badge " + (down ? "bad" : "ok")
+      $("bridgeBadge").textContent = down
+        ? "bridge down" + (b.restarts ? " · restarts: " + b.restarts : "")
+        : b.gate ? "gate: " + b.gate + (b.restarts ? " · restarts: " + b.restarts : "") : "bridge up"
       $("brVersion").textContent = (b.version || "–") + (b.runtime ? " · " + b.runtime : "")
       $("brRuntime").textContent = b.panel || ""
       $("brModels").textContent = b.discoveredModels != null ? b.discoveredModels : "–"
       $("brEgress").textContent = b.egress || "direct"
       $("brGate").textContent = b.url || ""
+      if (down) {
+        showBanner("Bridge backend is not responding" + (b.lastError ? " — " + b.lastError : "") + ". Is Bun installed? The watchdog retries every 15s.")
+      } else {
+        hideBanner()
+      }
+    } else {
+      hideBanner()
     }
-    hideBanner()
   } catch (e) {
     if (e.message !== "unauthorized") { $("upstreamDot").className = "dot bad"; $("upstreamText").textContent = "unreachable" }
   }
@@ -590,11 +600,12 @@ function renderTable(recent) {
   if (tablePage < 1) tablePage = 1
   const slice = rows.slice((tablePage - 1) * PAGE_SIZE, tablePage * PAGE_SIZE)
   tb.innerHTML = slice.map((r) => {
-    const cls = r.status < 300 ? "ok" : r.status === 429 ? "warn" : "bad"
+    const cls = r.status < 300 ? "ok" : r.status === 429 ? "warn" : r.status === 499 ? "warn" : "bad"
+    const label = r.status === 499 ? "abort" : r.status
     return `<tr>
       <td class="mono">${fmtTime(r.at)}</td>
       <td class="mono">${escapeHtml(r.model)}</td>
-      <td><span class="badge ${cls}">${r.status}</span></td>
+      <td><span class="badge ${cls}">${label}</span></td>
       <td class="mono">${r.ms == null ? "—" : fmtDur(r.ms)}</td>
       <td class="mono">${r.count}</td>
     </tr>`
@@ -1011,6 +1022,19 @@ async function pairOpencode() {
   } catch (e) {
     out.textContent = String(e && e.message || e)
     toast("Pair failed", "bad")
+  }
+}
+
+async function restartBridge() {
+  try {
+    $("pairOut").textContent = "restarting bridge…"
+    const r = await api("/api/bridge", { method: "POST", body: "{}" })
+    $("pairOut").textContent = r.ok ? "bridge is up" : "bridge still down — check Logs"
+    toast(r.ok ? "Bridge restarted" : "Bridge restart failed", r.ok ? "ok" : "bad")
+    await refreshStatus()
+  } catch (e) {
+    $("pairOut").textContent = String(e && e.message || e)
+    toast("Bridge restart failed", "bad")
   }
 }
 
