@@ -1,0 +1,27 @@
+# Files Vercel must not upload.
+#
+# bridge/ is the Bun-only backend. It cannot run on Vercel (the free-tier gate
+# refuses Node's TLS fingerprint) and its package.json declares a Bun entry
+# ("main": "server.js", "engines": { "bun": ... }), which makes Vercel try to
+# build it as a Bun function:
+#
+#   Invalid export found in module "/var/task/bridge/server.cjs".
+#   The default export must be a function or server.
+#
+# The deployed dashboard talks to a bridge running elsewhere via BRIDGE_URL, so
+# the folder is dead weight here.
+bridge/
+
+# Local tooling and docs - not needed to serve the dashboard or /v1 proxy.
+legacy/
+test/
+scripts/
+.github/
+llms.txt
+llms-full.txt
+README.md
+.env
+.env.example
+zen-proxy.json
+free-models.json
+*.log

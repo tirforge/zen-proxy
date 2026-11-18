@@ -95,6 +95,14 @@ Notes for the hosted setup:
   step (`installCommand`). If a build still fails before the function is
   packaged (e.g. `[ENOENT] spawn npm ENOENT` from the build image), redeploy
   with **Clear build cache** — nothing in the repo needs `npm install`.
+- `.vercelignore` uploads only what the deployment needs (`index.html`,
+  `assets/`, `server.mjs`, `api/`, `vercel.json`). In particular it drops
+  `bridge/`: that folder declares a Bun entry point, and Vercel otherwise tries
+  to build `bridge/server.js` as a Bun function, which fails with
+  `Invalid export found in module "/var/task/bridge/server.cjs"`.
+- Keep **Framework Preset = Other** and **Root Directory = empty** in the
+  project settings; a leftover Bun preset (or deploying with Root Directory
+  `bridge`) reproduces that same error even with `.vercelignore` in place.
 
 ## What the dashboard adds over the bridge alone
 
