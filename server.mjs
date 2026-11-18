@@ -1032,12 +1032,19 @@ const handleRequest = async (req, res) => {
   }
 
   if (pathname === "/" || pathname === "/index.html") {
+    const dir = staticDir()
     try {
-      const html = fs.readFileSync(path.join(__dirname, "index.html"))
+      const html = fs.readFileSync(path.join(dir, "index.html"))
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" })
       return res.end(html)
-    } catch {
-      return sendJson(res, 500, { error: "index.html missing" })
+    } catch (e) {
+      return sendJson(res, 500, {
+        error: "index.html missing",
+        lookedIn: staticDirCandidates(),
+        dirname: __dirname,
+        cwd: process.cwd(),
+        detail: String(e?.message || e),
+      })
     }
   }
 
@@ -1053,9 +1060,10 @@ const handleRequest = async (req, res) => {
   // bridge/ and zen-proxy.json sit there and must stay private.
   if (!pathname.startsWith("/assets/")) return sendJson(res, 404, { error: "not found" })
   if (pathname.includes("..") || pathname.includes("\0")) return sendJson(res, 400, { error: "bad path" })
+  const root = staticDir()
   const safe = path.normalize(pathname.slice(1))
-  const assetsDir = path.join(__dirname, "assets")
-  const file = path.join(__dirname, safe)
+  const assetsDir = path.join(root, "assets")
+  const file = path.join(root, safe)
   if (file.startsWith(assetsDir + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) {
     // Revalidate with an ETag keyed on size + mtime so an edited asset is
     // picked up on a normal refresh instead of a stale cached copy.
@@ -1086,6 +1094,23 @@ const server = http.createServer((req, res) => {
 // handler per request; it must not open a listener or spawn a bridge.
 export { handleRequest }
 export default handleRequest
+
+// The static files sit next to server.mjs locally, but a serverless bundler may
+// place the function deeper (api/) or set cwd elsewhere. Look in the handful of
+// plausible roots before giving up; index.html is the marker.
+function staticDirCandidates() {
+  const dirs = [__dirname, path.join(__dirname, ".."), process.cwd(), "/var/task"]
+  return [...new Set(dirs)]
+}
+
+function staticDir() {
+  for (const dir of staticDirCandidates()) {
+    try {
+      if (fs.existsSync(path.join(dir, "index.html"))) return dir
+    } catch {}
+  }
+  return __dirname
+}
 
 function guessType(file) {
   const ext = path.extname(file).toLowerCase()
@@ -1121,5 +1146,5 @@ if (!IS_VERCEL) {
 
 // A background failure (bridge watchdog, config write, stream) must not take
 // the dashboard down with it.
-process.on("unhandledRejection", (e) => log(`unhandled rejection: ${e?.message || e}`))
-process.on("uncaughtException", (e) => log(`uncaught exception: ${e?.message || e}`))
+process.on("unhandledRejection", (e) => log(`unhandled rejection: ${e?.stack || e?.message || e}`))
+process.on("uncaughtException", (e) => log(`uncaught exception: ${e?.stack || e?.message || e}`))
