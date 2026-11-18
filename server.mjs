@@ -1038,6 +1038,22 @@ const handleRequest = async (req, res) => {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" })
       return res.end(html)
     } catch (e) {
+      // Serverless bundle did not carry index.html. The same deployment hosts
+      // it statically, so fetch the copy instead of failing the page.
+      const host = req.headers.host
+      if (pathname === "/" && host && !isLocalHost(String(host).split(":")[0]) && !req.headers["x-zp-static"]) {
+        try {
+          const r = await fetch(`https://${host}/index.html`, {
+            headers: { "x-zp-static": "1" },
+            signal: AbortSignal.timeout(8000),
+          })
+          if (r.ok) {
+            const html = Buffer.from(await r.arrayBuffer())
+            res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" })
+            return res.end(html)
+          }
+        } catch {}
+      }
       return sendJson(res, 500, {
         error: "index.html missing",
         lookedIn: staticDirCandidates(),
@@ -1046,6 +1062,24 @@ const handleRequest = async (req, res) => {
         detail: String(e?.message || e),
       })
     }
+  }
+
+  // Diagnostic: shows what the function really received after the rewrite.
+  // No secrets are echoed (authorization/cookie are stripped).
+  if (pathname === "/api/_debug") {
+    const headers = {}
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (["authorization", "cookie", "x-api-key"].includes(k)) continue
+      headers[k] = v
+    }
+    return sendJson(res, 200, {
+      url: req.url,
+      pathname,
+      method: req.method,
+      headers,
+      deployment: { vercel: IS_VERCEL, storage, bridgeUrl: config.bridgeUrl },
+      staticDirs: staticDirCandidates(),
+    })
   }
 
   if (pathname === "/health") {
@@ -1077,6 +1111,16 @@ const handleRequest = async (req, res) => {
     return res.end(fs.readFileSync(file))
   }
 
+  // On Vercel a 404 here usually means the rewrite dropped the original path,
+  // so include what the function actually received.
+  if (IS_VERCEL) {
+    const headers = {}
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (["authorization", "cookie", "x-api-key"].includes(k)) continue
+      headers[k] = v
+    }
+    return sendJson(res, 404, { error: "not found", url: req.url, pathname, method: req.method, headers })
+  }
   sendJson(res, 404, { error: "not found" })
 }
 
