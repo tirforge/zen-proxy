@@ -771,11 +771,17 @@ async function populateConfigForm() {
   try {
     const st = await api("/api/status")
     const d = st.deployment || {}
+    const place =
+      d.storage === "kv"
+        ? "Settings are saved to Vercel KV, so they survive restarts — no env var needed."
+        : d.storage === "file"
+          ? "Settings are saved to zen-proxy.json on this machine."
+          : "This deployment has no writable storage: settings apply to the running instance only. Connect Vercel KV (KV_REST_API_URL + KV_REST_API_TOKEN) or set env vars to persist them."
     $("cfgDeploy").textContent = d.vercel
-      ? "Running on Vercel: saves above apply to this instance only. Put the durable values in environment variables (PROXY_KEY, BRIDGE_URL, ALL_MODELS, DEFAULT_MODEL)."
+      ? "Running on Vercel. " + place
       : d.remoteBridge
-        ? "Remote bridge: " + (config.bridgeUrl || "") + " — it must be reachable and running under Bun."
-        : "Local deployment — config is written to zen-proxy.json."
+        ? "Remote bridge: " + (config.bridgeUrl || "") + " — it must be reachable and running under Bun. " + place
+        : place
     $("cfgKeyHint").textContent = d.keyMissing
       ? "(required — this deployment is public)"
       : config.proxyKey
@@ -813,8 +819,10 @@ async function saveConfig() {
   }
   try {
     const r = await api("/api/config", { method: "PUT", body: JSON.stringify(body) })
-    if (r && r.persisted === false) toast("Applied to this instance — set env vars to persist", "bad")
-    else toast("Saved & applied")
+    const where = r && r.persisted
+    if (where === "kv") toast("Saved & applied (stored in Vercel KV)")
+    else if (where === "file") toast("Saved & applied (zen-proxy.json)")
+    else toast("Applied to this instance only — add KV storage or env vars to persist", "bad")
     config = null
     refreshAll()
   } catch (e) { toast("Save failed — check the values", "bad") }

@@ -40,18 +40,23 @@ const DEFAULTS = {
   effortVariants: ["minimal", "low", "medium", "high", "max"],
 }
 
-// Old zen-proxy environment names, kept for drop-in compatibility. They are
-// re-applied on every boot and win over zen-proxy.json.
+// Old zen-proxy environment names, kept for drop-in compatibility.
+// Precedence: infrastructure keys (bind address, bridge URL, key) always come
+// from the environment so a stored config can never open a deployment up; all
+// behaviour keys (allModels, models, aliases, ...) come from the stored config
+// when it has them, so the website toggle wins over an old env var.
+const INFRA_KEYS = new Set(["host", "port", "bridgeUrl", "bridgeDir", "autoStartBridge", "proxyKey"])
+
 const ENV_MAP = {
-  HOST: (v) => ({ host: v }),
-  PORT: (v) => (Number(v) > 0 ? { port: Number(v) } : {}),
-  PROXY_KEY: (v) => ({ proxyKey: v }),
-  DEFAULT_MODEL: (v) => ({ defaultModel: v }),
-  BRIDGE_URL: (v) => ({ bridgeUrl: v.replace(/\/$/, "") }),
-  BRIDGE_DIR: (v) => ({ bridgeDir: v }),
-  AUTO_START_BRIDGE: (v) => ({ autoStartBridge: v !== "0" }),
-  ALL_MODELS: (v) => ({ allModels: v !== "0" && v !== "" }),
-  ALL_MODELS_TARGET: (v) => ({ allModelsTarget: v }),
+  HOST: ["host", (v) => v],
+  PORT: ["port", (v) => (Number(v) > 0 ? Number(v) : null)],
+  PROXY_KEY: ["proxyKey", (v) => v],
+  DEFAULT_MODEL: ["defaultModel", (v) => v],
+  BRIDGE_URL: ["bridgeUrl", (v) => v.replace(/\/$/, "")],
+  BRIDGE_DIR: ["bridgeDir", (v) => v],
+  AUTO_START_BRIDGE: ["autoStartBridge", (v) => v !== "0"],
+  ALL_MODELS: ["allModels", (v) => v !== "0" && v !== ""],
+  ALL_MODELS_TARGET: ["allModelsTarget", (v) => v],
 }
 
 const JSON_ENV_MAP = {
@@ -59,6 +64,16 @@ const JSON_ENV_MAP = {
   MODEL_ALIASES: "modelAliases",
   RESPONSES_MODELS: "responsesModels",
 }
+
+// Vercel KV and Upstash Redis expose the same REST shape, and it is the only
+// writable storage a Vercel function has. Optional: without it, dashboard
+// changes live in memory for the life of the instance.
+const KV_URL = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "").replace(/\/$/, "")
+const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || ""
+const KV_KEY = process.env.ZEN_PROXY_KV_KEY || "zen-proxy:config"
+const kvEnabled = !!(KV_URL && KV_TOKEN)
+
+let storage = kvEnabled ? "kv" : IS_VERCEL ? "memory" : "file"
 
 function parseList(value) {
   const raw = String(value).trim()
@@ -74,35 +89,100 @@ function parseList(value) {
   return list.length ? list : null
 }
 
-function applyEnv(base) {
-  const next = { ...base }
-  for (const [name, fn] of Object.entries(ENV_MAP)) {
+function envObject() {
+  const env = {}
+  for (const [name, [key, fn]] of Object.entries(ENV_MAP)) {
     const v = process.env[name]
-    if (v !== undefined && v !== "") Object.assign(next, fn(v))
+    if (v === undefined || v === "") continue
+    const mapped = fn(v)
+    if (mapped !== null) env[key] = mapped
   }
   for (const [name, key] of Object.entries(JSON_ENV_MAP)) {
     const parsed = parseList(process.env[name] || "")
-    if (parsed && typeof parsed === "object") next[key] = parsed
+    if (parsed && typeof parsed === "object") env[key] = parsed
+  }
+  return env
+}
+
+const ENV = envObject()
+
+function buildConfig(stored) {
+  const has = (k) => stored && typeof stored === "object" && Object.prototype.hasOwnProperty.call(stored, k)
+  const next = { ...DEFAULTS, ...(stored && typeof stored === "object" ? stored : {}) }
+  for (const [key, value] of Object.entries(ENV)) {
+    if (INFRA_KEYS.has(key) || !has(key)) next[key] = value
   }
   return next
 }
 
-function loadConfig() {
-  let file = {}
+function loadConfigFile() {
   try {
-    file = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"))
+    return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"))
   } catch {
-    // Serverless filesystems are read-only; only persist locally.
-    if (!IS_VERCEL) {
-      try {
-        fs.writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULTS, null, 2) + "\n")
-      } catch {}
-    }
+    return null
   }
-  return applyEnv({ ...DEFAULTS, ...file })
 }
 
-let config = loadConfig()
+let config = buildConfig(loadConfigFile())
+if (!loadConfigFile() && !IS_VERCEL && !kvEnabled) {
+  try {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n")
+  } catch {}
+}
+
+let hydrated = !kvEnabled
+let hydratePromise = null
+
+async function ensureConfigHydrated() {
+  if (hydrated) return config
+  if (!hydratePromise) {
+    hydratePromise = (async () => {
+      try {
+        const r = await fetch(`${KV_URL}/get/${encodeURIComponent(KV_KEY)}`, {
+          headers: { authorization: `Bearer ${KV_TOKEN}` },
+          signal: AbortSignal.timeout(4000),
+        })
+        const j = await r.json()
+        if (j && typeof j.result === "string" && j.result) {
+          const stored = JSON.parse(j.result)
+          config = buildConfig(stored)
+          log("config loaded from KV")
+        }
+      } catch (e) {
+        log(`kv load failed: ${e?.message || e}`)
+      }
+      hydrated = true
+      return config
+    })()
+  }
+  return hydratePromise
+}
+
+async function persistConfig() {
+  if (kvEnabled) {
+    try {
+      const r = await fetch(`${KV_URL}/set/${encodeURIComponent(KV_KEY)}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${KV_TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify(config),
+        signal: AbortSignal.timeout(5000),
+      })
+      if (r.ok) {
+        storage = "kv"
+        return "kv"
+      }
+    } catch (e) {
+      log(`kv save failed: ${e?.message || e}`)
+    }
+  }
+  try {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n")
+    storage = "file"
+    return "file"
+  } catch {}
+  storage = "memory"
+  return "memory"
+}
 const startedAt = Date.now()
 const logs = []
 const recent = []
@@ -409,9 +489,11 @@ async function buildStatus() {
       bridgeMisconfigured: IS_VERCEL && bridgeIsLocal(),
       keyRequired: !!config.proxyKey,
       keyMissing: authMisconfigured(),
+      storage,
     },
     allModels: !!config.allModels,
     allModelsTarget: config.allModelsTarget,
+    effortVariants: config.effortVariants,
     uptime: Math.floor((now - startedAt) / 1000),
     requests: {
       total: counters.total,
@@ -703,6 +785,10 @@ const handleRequest = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "127.0.0.1"}`)
   const pathname = url.pathname
 
+  // On serverless there is no boot phase worth trusting: load the saved config
+  // (Vercel KV / Upstash) once per instance before answering anything.
+  if (!hydrated) await ensureConfigHydrated()
+
   // /v1/models is answered here so all-models mode can expand every entry into
   // its `#effort` variants. Everything else under /v1/ is proxied verbatim.
   if (pathname === "/v1/models" && req.method === "GET") return handleModels(req, res)
@@ -773,20 +859,18 @@ const handleRequest = async (req, res) => {
         }
 
         config = next
-        let persisted = true
-        try {
-          fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n")
-        } catch {
-          // Read-only filesystem (Vercel): keep the change for this instance
-          // and tell the caller to put it in environment variables instead.
-          persisted = false
-        }
-        log(`config saved${persisted ? "" : " (memory only — filesystem is read-only)"}`)
+        const persisted = await persistConfig()
+        log(`config saved (${persisted})`)
         return sendJson(res, 200, {
           ok: true,
           config,
           persisted,
-          note: persisted ? undefined : "Filesystem is read-only here. Set the same values as environment variables (PROXY_KEY, DEFAULT_MODEL, ALL_MODELS, ...) to make them permanent.",
+          note:
+            persisted === "kv"
+              ? undefined
+              : persisted === "file"
+                ? undefined
+                : "This deployment has no writable storage, so the change lives for this instance only. Connect Vercel KV / Upstash (KV_REST_API_URL + KV_REST_API_TOKEN) to persist it, or set the same values as environment variables.",
         })
       } catch (e) {
         return sendJson(res, 400, { error: String(e?.message || e) })
@@ -834,9 +918,7 @@ const handleRequest = async (req, res) => {
     const ids = await bridgeModels(true)
     if (ids.length && config.fallbackModels.length === 0) {
       config.fallbackModels = ids
-      try {
-        fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n")
-      } catch {}
+      await persistConfig()
     }
     log(`sync: ${ids.length} models from bridge catalog`)
     return sendJson(res, 200, { ok: true, models: ids, at: modelCache.at })

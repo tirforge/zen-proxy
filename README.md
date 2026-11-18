@@ -57,15 +57,17 @@ browser ──► Vercel (dashboard + /v1 proxy) ──► https://your-host:201
 ```
 
 1. Import `tirforge/zen-proxy` in Vercel. No build step: `index.html`, `assets/`
-   are static and `api/index.mjs` is the function (wired by `vercel.json`).
+   are static and `api/index.mjs` is the function (wired by `vercel.json`). The
+   deployment is a **Node.js serverless function + CDN**, not a container.
 2. Set environment variables in the project settings:
 
 | Variable | Required | Example |
 |---|---|---|
 | `PROXY_KEY` | **yes** | a long random string — the dashboard and `/v1` stay locked without it |
 | `BRIDGE_URL` | **yes** | `https://bridge.example.com` (public URL of your Bun bridge) |
-| `ALL_MODELS` | no | `1` enables all-models mode by default |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | recommended | Vercel KV (or Upstash `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`) so dashboard changes survive restarts |
 | `DEFAULT_MODEL` | no | `nemotron-3.5-lightning-free` |
+| `ALL_MODELS` | no | only the **initial default**; once you flip the toggle in the dashboard, the stored value wins |
 | `HOST` / `PORT` | no | ignored on Vercel |
 | `FALLBACK_MODELS`, `MODEL_ALIASES`, `RESPONSES_MODELS` | no | JSON |
 
@@ -81,8 +83,12 @@ Notes for the hosted setup:
   key on a public deployment the app answers `503 proxy_key_missing` instead of
   silently serving the free quota to anyone.
 - The OpenCode web UI / pair buttons are local-only and are hidden on Vercel.
-- The dashboard's Save button writes to memory only there (read-only
-  filesystem); set the environment variables above to persist.
+- Settings changed in the dashboard are stored in **Vercel KV / Upstash** when
+  those variables exist, so the all-models toggle (and every other behaviour
+  key) persists across deployments without touching env vars. Without KV the
+  change lives for the life of the function instance and the dashboard says so.
+- Infrastructure keys (`PROXY_KEY`, `BRIDGE_URL`, `HOST`, `PORT`) always come
+  from the environment, so a stored config can never open the deployment up.
 - Functions time out after 60s (`vercel.json`), so very long generations are
   cut off by the platform.
 
@@ -152,30 +158,50 @@ Notes for the hosted setup:
 Dashboard writes are same-origin only and require JSON, so a random web page
 cannot rewrite your config.
 
+### Where settings are stored
+
+| Deployment | Storage | Survives restart |
+|---|---|---|
+| local | `zen-proxy.json` | yes |
+| Vercel + Vercel KV / Upstash | KV key `ZEN_PROXY_KV_KEY` (default `zen-proxy:config`) | yes |
+| Vercel, no KV | memory | no — the dashboard tells you so when saving |
+
+`GET /api/status` reports the active mode as `deployment.storage`:
+`"kv"`, `"file"` or `"memory"`.
+
 ### Environment variables (old names, still supported)
 
-The original zen-proxy variable names are kept and win over the JSON file, which
-is what a Vercel deployment uses (read-only filesystem):
+The original zen-proxy variable names are kept. Precedence is deliberate:
+
+- **infrastructure** (`HOST`, `PORT`, `PROXY_KEY`, `BRIDGE_URL`, `BRIDGE_DIR`,
+  `AUTO_START_BRIDGE`) always comes from the environment, so a stored config can
+  never expose a public deployment;
+- **behaviour** (`DEFAULT_MODEL`, `ALL_MODELS`, `ALL_MODELS_TARGET`,
+  `FALLBACK_MODELS`, `MODEL_ALIASES`, `RESPONSES_MODELS`) is only a default —
+  once the value exists in the stored config, the dashboard wins.
 
 | Variable | Maps to |
 |---|---|
-| `HOST`, `PORT` | bind address |
-| `PROXY_KEY` | `proxyKey` |
+| `HOST`, `PORT` | bind address (infrastructure) |
+| `PROXY_KEY` | `proxyKey` (infrastructure) |
 | `DEFAULT_MODEL` | `defaultModel` |
-| `BRIDGE_URL` | `bridgeUrl` |
-| `BRIDGE_DIR` | `bridgeDir` |
-| `AUTO_START_BRIDGE` (`0` disables) | `autoStartBridge` |
-| `ALL_MODELS` (`1` enables) | `allModels` |
+| `BRIDGE_URL` | `bridgeUrl` (infrastructure) |
+| `BRIDGE_DIR` | `bridgeDir` (infrastructure) |
+| `AUTO_START_BRIDGE` (`0` disables) | `autoStartBridge` (infrastructure) |
+| `ALL_MODELS` (`1` enables) | initial `allModels` default |
 | `ALL_MODELS_TARGET` | `allModelsTarget` |
 | `FALLBACK_MODELS` | JSON array or comma list |
 | `MODEL_ALIASES` | JSON map |
 | `RESPONSES_MODELS` | JSON array or comma list |
 | `ZEN_PROXY_CONFIG` | config file path |
+| `KV_REST_API_URL`, `KV_REST_API_TOKEN` | Vercel KV storage (or `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`) |
+| `ZEN_PROXY_KV_KEY` | KV key name (default `zen-proxy:config`) |
 
 ## All-models mode
 
-Set `ALL_MODELS=1` (env) or tick **All-models mode** in Settings when you want any
-model name to work, not just the 11 free catalog ids:
+Flip **All-models mode** in Settings — that switch is the source of truth and
+overrides `ALL_MODELS`. The env var only seeds the first run (useful for a
+fresh Vercel project before you open the dashboard).
 
 - `/v1/models` lists every free model plus its `#effort` variants
   (`beam-free#high`, `nemotron-3.5-lightning-free#low`, …).
