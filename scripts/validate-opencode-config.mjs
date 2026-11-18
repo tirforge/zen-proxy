@@ -6,7 +6,11 @@ const [cfgPath, bakPath, livePath] = process.argv.slice(2)
 const raw = fs.readFileSync(cfgPath)
 const cfg = JSON.parse(raw.toString("utf8"))
 const bak = JSON.parse(fs.readFileSync(bakPath, "utf8"))
-const live = JSON.parse(fs.readFileSync(livePath, "utf8")).data.map((m) => m.id)
+const liveAll = JSON.parse(fs.readFileSync(livePath, "utf8")).data.map((m) => m.id)
+// /v1/models also advertises `model#effort` ids for clients that route effort
+// through the id. OpenCode must not use them: it reads `#` as a variant
+// selector, so only the base ids belong in the config.
+const base = liveAll.filter((id) => !id.includes("#"))
 
 const problems = []
 const ok = (cond, msg) => { if (!cond) problems.push(msg) }
@@ -24,6 +28,7 @@ for (const id of Object.keys(bak.provider)) {
   ok(JSON.stringify(cfg.provider[id]) === JSON.stringify(bak.provider[id]), `existing provider ${id} changed`)
 }
 
+const EFFORTS = ["minimal", "low", "medium", "high", "max"]
 for (const id of ["zen", "zen-local"]) {
   const p = cfg.provider[id]
   ok(!!p, `${id} provider missing`)
@@ -32,18 +37,24 @@ for (const id of ["zen", "zen-local"]) {
   ok(typeof p.options?.baseURL === "string" && p.options.baseURL.endsWith("/v1"), `${id}: bad baseURL`)
   ok(p.options?.apiKey === "aarsha", `${id}: apiKey is not aarsha`)
   const models = Object.keys(p.models || {})
-  ok(models.length === live.length, `${id}: ${models.length} models, live reports ${live.length}`)
-  const missing = live.filter((m) => !p.models[m])
+  ok(models.length === base.length, `${id}: ${models.length} models, live reports ${base.length} base models`)
+  const missing = base.filter((m) => !p.models[m])
   ok(missing.length === 0, `${id}: missing live models ${missing.join(", ")}`)
-  const extra = models.filter((m) => !live.includes(m))
+  const extra = models.filter((m) => !base.includes(m))
   ok(extra.length === 0, `${id}: models not served upstream ${extra.join(", ")}`)
   for (const m of models) {
     const entry = p.models[m]
-    ok(/\S/.test(m) && !/\s/.test(m), `${id}: bad model id "${m}"`)
+    ok(/\S/.test(m) && !/[\s#]/.test(m), `${id}: bad model id "${m}"`)
     ok(typeof entry.name === "string" && entry.name.length > 0, `${id}/${m}: missing name`)
-    ok(entry.tools === true, `${id}/${m}: tools is not true`)
+    ok(entry.tool_call === true, `${id}/${m}: tool_call is not true`)
+    ok(entry.reasoning === true, `${id}/${m}: reasoning is not true`)
     ok(Number.isInteger(entry.limit?.context) && entry.limit.context > 0, `${id}/${m}: bad context limit`)
     ok(Number.isInteger(entry.limit?.output) && entry.limit.output > 0, `${id}/${m}: bad output limit`)
+    const variants = Object.keys(entry.variants || {})
+    ok(variants.sort().join(",") === [...EFFORTS].sort().join(","), `${id}/${m}: variants are ${variants.join(",") || "none"}`)
+    for (const v of variants) {
+      ok(entry.variants[v].reasoningEffort === v, `${id}/${m}#${v}: reasoningEffort mismatch`)
+    }
   }
   const dupes = models.length - new Set(models).size
   ok(dupes === 0, `${id}: ${dupes} duplicate model ids`)

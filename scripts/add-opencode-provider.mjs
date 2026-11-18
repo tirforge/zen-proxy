@@ -1,10 +1,17 @@
 // Adds the zen-proxy provider(s) to the OpenCode config, keeping everything else.
-// Usage: node scripts/add-opencode-provider.mjs <config.jsonc> <models.json>
+// Usage: node scripts/add-opencode-provider.mjs <config.jsonc> <baseModelsJson>
+//
+// Model ids must NOT contain "#": OpenCode reads `provider/model#variant` as a
+// variant selector, so an id like "big-pickle#max" fails with "Variant
+// unavailable" instead of selecting the model. Effort is exposed through the
+// model's `variants` block instead, which OpenCode sends as `reasoning_effort`
+// on the request (verified against a request-echoing server; the proxy forwards
+// that field to the bridge).
 import fs from "node:fs"
 
 const cfgPath = process.argv[2]
 const modelsPath = process.argv[3]
-const ids = JSON.parse(fs.readFileSync(modelsPath, "utf8"))
+const bases = JSON.parse(fs.readFileSync(modelsPath, "utf8"))
 
 const NAMES = {
   "big-pickle": "Big Pickle",
@@ -20,20 +27,24 @@ const NAMES = {
   "hy4-flash-free": "HY4 Flash",
 }
 
-const title = (id) => {
-  const [base, effort] = id.split("#")
-  const name = NAMES[base] || base
-  return effort ? `${name} (${effort})` : name
+// Each entry becomes `reasoning_effort` on the upstream request.
+const variants = {
+  minimal: { reasoningEffort: "minimal" },
+  low: { reasoningEffort: "low" },
+  medium: { reasoningEffort: "medium" },
+  high: { reasoningEffort: "high" },
+  max: { reasoningEffort: "max" },
 }
 
 const buildModels = () => {
   const models = {}
-  for (const id of ids) {
+  for (const id of bases) {
     models[id] = {
-      name: title(id),
-      tools: true,
+      name: NAMES[id] || id,
+      tool_call: true,
       reasoning: true,
       limit: { context: 131072, output: 32768 },
+      variants,
     }
   }
   return models
@@ -58,4 +69,4 @@ cfg.provider["zen-local"] = {
 
 fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf8")
 console.log(`providers: ${Object.keys(cfg.provider).join(", ")}`)
-console.log(`models per zen provider: ${Object.keys(models).length}`)
+console.log(`models per zen provider: ${Object.keys(models).length} (each with ${Object.keys(variants).length} effort variants)`)
