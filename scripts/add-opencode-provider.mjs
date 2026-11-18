@@ -6,13 +6,23 @@ const cfgPath = process.argv[2]
 const modelsPath = process.argv[3]
 const ids = JSON.parse(fs.readFileSync(modelsPath, "utf8"))
 
+const NAMES = {
+  "big-pickle": "Big Pickle",
+  "mimo-v2.6-flash-free": "MiMo V2.6 Flash",
+  "deepseek-v4.1-flash-free": "DeepSeek V4.1 Flash",
+  "longcat-2.5-free": "LongCat 2.5",
+  "iceman-free": "Iceman",
+  "inkling-2-small-free": "Inkling 2 Small",
+  "beam-free": "Beam",
+  "flint-40b-free": "Flint 40B",
+  "nemotron-3.5-super-vl-free": "Nemotron 3.5 Super VL",
+  "nemotron-3.5-lightning-free": "Nemotron 3.5 Lightning",
+  "hy4-flash-free": "HY4 Flash",
+}
+
 const title = (id) => {
   const [base, effort] = id.split("#")
-  const name = base
-    .replace(/-free$/, "")
-    .split("-")
-    .map((p) => (p.length <= 3 ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1)))
-    .join(" ")
+  const name = NAMES[base] || base
   return effort ? `${name} (${effort})` : name
 }
 
@@ -23,7 +33,7 @@ const buildModels = () => {
       name: title(id),
       tools: true,
       reasoning: true,
-      limit: { context: 200000, output: 32000 },
+      limit: { context: 131072, output: 32768 },
     }
   }
   return models
