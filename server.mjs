@@ -5,7 +5,7 @@
 // request to an opencode-free-bridge instance, which does the actual upstream
 // work (v2 gate shape, identity, fallbacks, egress pool).
 //
-//   node zen-proxy.mjs          # local: auto-starts the bridge under Bun
+//   node server.mjs          # local: auto-starts the bridge under Bun
 //
 // On Vercel the bridge cannot run (the free-tier gate refuses Node's TLS
 // fingerprint), so the deployment acts as dashboard + reverse proxy in front of
@@ -19,8 +19,8 @@ import { fileURLToPath } from "node:url"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
-// Minimal .env loader (no dependency): `node zen-proxy.mjs` reads a local `.env`
-// next to zen-proxy.mjs, without ever overriding real environment variables —
+// Minimal .env loader (no dependency): `node server.mjs` reads a local `.env`
+// next to server.mjs, without ever overriding real environment variables —
 // which is also what Vercel/`docker run -e` set. Kept tiny on purpose.
 function loadDotEnv(file) {
   let raw = ""
@@ -1022,7 +1022,7 @@ const handleRequest = async (req, res) => {
       return sendJson(res, 200, {
         link: null,
         qr: null,
-        raw: "Pairing only works on the machine running OpenCode. Run `node zen-proxy.mjs` locally, or run `opencode pair` in a terminal.",
+        raw: "Pairing only works on the machine running OpenCode. Run `node server.mjs` locally, or run `opencode pair` in a terminal.",
         local: false,
       })
     }
@@ -1094,7 +1094,7 @@ const handleRequest = async (req, res) => {
     })
   }
 
-  // Static assets live under /assets. Never serve the repo root: zen-proxy.mjs,
+  // Static assets live under /assets. Never serve the repo root: server.mjs,
   // bridge/ and zen-proxy.json sit there and must stay private.
   if (!pathname.startsWith("/assets/")) {
     if (IS_VERCEL) {
@@ -1157,7 +1157,7 @@ const server = http.createServer((req, res) => {
 export { handleRequest }
 export default handleRequest
 
-// The static files sit next to zen-proxy.mjs locally, but a serverless bundler may
+// The static files sit next to server.mjs locally, but a serverless bundler may
 // place the function deeper (api/) or set cwd elsewhere. Look in the handful of
 // plausible roots before giving up; index.html is the marker.
 function staticDirCandidates() {

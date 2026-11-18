@@ -11,7 +11,7 @@
 // /v1/* -> /api/v1/*). No query string is involved, because a rewrite
 // destination's query is not reliably preserved for functions.
 //
-// The wrapper maps the path back to what zen-proxy.mjs expects (/api/health ->
+// The wrapper maps the path back to what server.mjs expects (/api/health ->
 // /health, /api/v1/* -> /v1/*) and never lets a crash escape as an opaque
 // FUNCTION_INVOCATION_FAILED page.
 
@@ -19,9 +19,9 @@ let appPromise = null
 
 function loadApp() {
   if (!appPromise) {
-    appPromise = import("../zen-proxy.mjs").then((m) => {
+    appPromise = import("../server.mjs").then((m) => {
       const fn = m.handleRequest || m.default
-      if (typeof fn !== "function") throw new Error("zen-proxy.mjs did not export a handler")
+      if (typeof fn !== "function") throw new Error("server.mjs did not export a handler")
       return fn
     })
   }

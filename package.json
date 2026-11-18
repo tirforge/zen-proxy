@@ -5,8 +5,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node zen-proxy.mjs",
-    "start:bun": "bun zen-proxy.mjs",
+    "start": "node server.mjs",
+    "start:bun": "bun server.mjs",
     "bridge": "bun bridge/server.js",
     "test": "node --test"
   },
