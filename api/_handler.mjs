@@ -52,6 +52,8 @@ function requestPath(req) {
 }
 
 export async function route(req, res) {
+  // Remember what the platform actually handed us, for /api/_debug and 404s.
+  req.__zpIn = req.url
   req.url = requestPath(req)
   try {
     const app = await loadApp()

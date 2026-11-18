@@ -1074,11 +1074,15 @@ const handleRequest = async (req, res) => {
     }
     return sendJson(res, 200, {
       url: req.url,
+      incoming: req.__zpIn || null,
       pathname,
       method: req.method,
       headers,
       deployment: { vercel: IS_VERCEL, storage, bridgeUrl: config.bridgeUrl },
       staticDirs: staticDirCandidates(),
+      files: (() => {
+        try { return fs.readdirSync(__dirname).slice(0, 40) } catch (e) { return String(e?.message || e) }
+      })(),
     })
   }
 
@@ -1092,7 +1096,21 @@ const handleRequest = async (req, res) => {
 
   // Static assets live under /assets. Never serve the repo root: server.mjs,
   // bridge/ and zen-proxy.json sit there and must stay private.
-  if (!pathname.startsWith("/assets/")) return sendJson(res, 404, { error: "not found" })
+  if (!pathname.startsWith("/assets/")) {
+    if (IS_VERCEL) {
+      return sendJson(res, 404, {
+        error: "not found",
+        url: req.url,
+        incoming: req.__zpIn || null,
+        pathname,
+        method: req.method,
+        files: (() => {
+          try { return fs.readdirSync(__dirname).slice(0, 40) } catch (e) { return String(e?.message || e) }
+        })(),
+      })
+    }
+    return sendJson(res, 404, { error: "not found" })
+  }
   if (pathname.includes("..") || pathname.includes("\0")) return sendJson(res, 400, { error: "bad path" })
   const root = staticDir()
   const safe = path.normalize(pathname.slice(1))
