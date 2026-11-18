@@ -384,6 +384,21 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
       </table>
       <div class="pager" id="reqPager"></div>
     </div>
+
+    <div class="panel">
+      <h2><span class="hh">Bridge backend</span><span class="badge mut" id="bridgeBadge">…</span></h2>
+      <div class="cards" style="margin-bottom:16px">
+        <div class="card"><div class="label">Bridge</div><div class="value mono" id="brVersion">–</div><div class="sub" id="brRuntime">–</div></div>
+        <div class="card"><div class="label">Free models</div><div class="value" id="brModels">–</div><div class="sub">discovered by bridge</div></div>
+        <div class="card"><div class="label">Egress</div><div class="value mono" id="brEgress">–</div><div class="sub mono" id="brGate">–</div></div>
+      </div>
+      <div class="row" style="gap:10px;flex-wrap:wrap">
+        <button onclick="openBridgePanel()">◱ Bridge egress panel</button>
+        <button onclick="openWebUI()">◈ OpenCode web UI</button>
+        <button onclick="pairOpencode()">🔗 Pair OpenCode</button>
+      </div>
+      <div id="pairOut" class="hint mono" style="margin-top:14px;word-break:break-all"></div>
+    </div>
   </section>
 
   <section class="tab" id="tab-models">
@@ -543,6 +558,16 @@ async function refreshStatus() {
     $("ovModels").textContent = st.models.total
     $("ovAllowed").textContent = st.models.allowed + " allowed"
     if (document.getElementById("tab-overview").classList.contains("active")) renderTable(st.recent)
+    const b = st.bridge || {}
+    if ($("bridgeBadge")) {
+      $("bridgeBadge").className = "badge " + (st.upstreamOk ? "ok" : "bad")
+      $("bridgeBadge").textContent = b.gate ? "gate: " + b.gate : (st.upstreamOk ? "bridge up" : "bridge down")
+      $("brVersion").textContent = (b.version || "–") + (b.runtime ? " · " + b.runtime : "")
+      $("brRuntime").textContent = b.panel || ""
+      $("brModels").textContent = b.discoveredModels != null ? b.discoveredModels : "–"
+      $("brEgress").textContent = b.egress || "direct"
+      $("brGate").textContent = b.url || ""
+    }
     hideBanner()
   } catch (e) {
     if (e.message !== "unauthorized") { $("upstreamDot").className = "dot bad"; $("upstreamText").textContent = "unreachable" }
@@ -930,6 +955,63 @@ function escapeAttr(s) { return escapeHtml(s) }
 // attributes; \x27 and \u0026 survive attribute parsing and decode inside the JS string.
 function jsStr(s) {
   return JSON.stringify(String(s ?? "")).replace(/'/g, "\\x27").replace(/&/g, "\\u0026")
+}
+
+async function openBridgePanel() {
+  try {
+    const st = await api("/api/status")
+    const url = (st.bridge && st.bridge.panel) || "http://127.0.0.1:20129/"
+    window.open(url, "_blank", "noopener")
+    toast("Bridge panel: " + url)
+  } catch { toast("Bridge unreachable", "bad") }
+}
+
+async function openWebUI() {
+  try {
+    const st = await api("/api/opencode/status")
+    if (st.url) {
+      window.open(st.url, "_blank", "noopener")
+      toast("OpenCode web UI: " + st.url)
+      $("pairOut").textContent = "web UI: " + st.url
+    } else {
+      toast("OpenCode server not running — pair first", "bad")
+      $("pairOut").textContent = (st.raw || "no opencode service found").slice(0, 400)
+    }
+  } catch { toast("Could not read OpenCode status", "bad") }
+}
+
+async function pairOpencode() {
+  const out = $("pairOut")
+  out.textContent = "starting opencode pair…"
+  try {
+    const r = await api("/api/opencode/pair")
+    if (r.link) {
+      out.innerHTML = ""
+      const a = document.createElement("a")
+      a.href = r.link
+      a.textContent = r.link
+      a.target = "_blank"
+      a.rel = "noopener"
+      const line = document.createElement("div")
+      line.textContent = "Open this once (expires in 5 minutes):"
+      out.appendChild(line)
+      out.appendChild(a)
+      if (r.qr) {
+        const pre = document.createElement("pre")
+        pre.textContent = r.qr
+        pre.style.marginTop = "10px"
+        pre.style.lineHeight = "1"
+        out.appendChild(pre)
+      }
+      try { await navigator.clipboard.writeText(r.link); toast("Pair link copied") } catch { toast("Pair link ready") }
+    } else {
+      out.textContent = (r.raw || "no link returned").slice(0, 600)
+      toast("Pair failed — see output", "bad")
+    }
+  } catch (e) {
+    out.textContent = String(e && e.message || e)
+    toast("Pair failed", "bad")
+  }
 }
 
 async function refreshAll() {

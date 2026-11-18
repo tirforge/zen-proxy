@@ -1,14 +1,16 @@
 {
   "name": "zen-proxy",
-  "version": "1.0.0",
-  "description": "Zero-dependency OpenAI-compatible reverse proxy that unlocks opencode's Zen anonymous free tier for any coding agent",
+  "version": "2.0.0",
+  "description": "zen-proxy dashboard + opencode-free-bridge backend: free OpenCode Zen models for any agent, with a web UI, egress panel and OpenCode pair link",
   "type": "module",
-  "main": "zen-proxy.mjs",
+  "main": "server.mjs",
   "bin": {
-    "zen-proxy": "zen-proxy.mjs"
+    "zen-proxy": "server.mjs"
   },
   "scripts": {
-    "start": "node zen-proxy.mjs",
+    "start": "node server.mjs",
+    "start:bun": "bun server.mjs",
+    "bridge": "bun bridge/server.js",
     "test": "node --test"
   },
   "engines": {
