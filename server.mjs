@@ -1072,7 +1072,8 @@ const handleRequest = async (req, res) => {
   // egress is accepted before we build a direct (bridge-less) upstream path.
   if (pathname === "/api/_direct") {
     if (!isAuthorized(req)) return sendJson(res, 401, { error: "unauthorized" })
-    const url = "https://opencode.ai/inference/openai/v1/chat/completions"
+    const relay = (process.env.RELAY_URL || "").replace(/\/$/, "")
+    const url = (relay || "https://opencode.ai") + "/inference/openai/v1/chat/completions"
     const sessionId = "ses_" + crypto.randomBytes(12).toString("hex")
     const body = JSON.stringify({
       model: config.defaultModel || "big-pickle",
@@ -1094,15 +1095,18 @@ const handleRequest = async (req, res) => {
           "x-opencode-session-id": sessionId,
           "x-session-affinity": sessionId,
           "x-session-id": sessionId,
+          ...(relay && process.env.RELAY_KEY ? { "x-relay-key": process.env.RELAY_KEY } : {}),
         },
         body,
         signal: AbortSignal.timeout(45000),
       })
       const text = await r.text()
       return sendJson(res, 200, {
+        via: relay ? "relay" : "direct",
         status: r.status,
         ms: Date.now() - started,
-        apns: r.headers.get("cf-ray") ? "cloudflare" : null,
+        cfRay: r.headers.get("cf-ray"),
+        relayed: r.headers.get("x-zen-relay"),
         body: text.slice(0, 800),
       })
     } catch (e) {
