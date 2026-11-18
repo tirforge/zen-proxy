@@ -31,7 +31,7 @@ Requirements: **Node 18+** for the dashboard and **Bun** for the bridge
 
 git clone https://github.com/tirforge/zen-proxy
 cd zen-proxy
-node server.mjs
+node zen-proxy.mjs
 ```
 
 Open <http://127.0.0.1:8787>. The dashboard auto-starts the bridge on first boot
@@ -96,7 +96,7 @@ Notes for the hosted setup:
   packaged (e.g. `[ENOENT] spawn npm ENOENT` from the build image), redeploy
   with **Clear build cache** — nothing in the repo needs `npm install`.
 - `.vercelignore` uploads only what the deployment needs (`index.html`,
-  `assets/`, `server.mjs`, `api/`, `vercel.json`). In particular it drops
+  `assets/`, `zen-proxy.mjs`, `api/`, `vercel.json`). In particular it drops
   `bridge/`: that folder declares a Bun entry point, and Vercel otherwise tries
   to build `bridge/server.js` as a Bun function, which fails with
   `Invalid export found in module "/var/task/bridge/server.cjs"`.
@@ -194,7 +194,7 @@ The original zen-proxy variable names are kept. Precedence is deliberate:
   `configUpdatedAt` in the stored config, and from then on the website wins —
   which is what the settings page tells you.
 
-You can put the variables in a local `.env` next to `server.mjs`; it is read on
+You can put the variables in a local `.env` next to `zen-proxy.mjs`; it is read on
 startup without overriding real environment variables (so Vercel / `docker -e`
 always take precedence).
 

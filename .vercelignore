@@ -25,3 +25,6 @@ README.md
 zen-proxy.json
 free-models.json
 *.log
+
+# Vercel uploads the git dir too; it is never part of the deployment.
+.git/
