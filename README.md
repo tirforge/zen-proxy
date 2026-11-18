@@ -91,6 +91,10 @@ Notes for the hosted setup:
   from the environment, so a stored config can never open the deployment up.
 - Functions time out after 60s (`vercel.json`), so very long generations are
   cut off by the platform.
+- The project has **zero dependencies**, so `vercel.json` overrides the install
+  step (`installCommand`). If a build still fails before the function is
+  packaged (e.g. `[ENOENT] spawn npm ENOENT` from the build image), redeploy
+  with **Clear build cache** — nothing in the repo needs `npm install`.
 
 ## What the dashboard adds over the bridge alone
 
