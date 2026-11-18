@@ -1,0 +1,23 @@
+[Unit]
+Description=OpenCode free bridge (zen-proxy backend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/zen-bridge
+Environment=HOST=127.0.0.1
+Environment=PORT=20129
+Environment=AUTO_UPDATE=0
+ExecStart=/home/ubuntu/.bun/bin/bun /home/ubuntu/zen-bridge/server.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu
+
+[Install]
+WantedBy=multi-user.target

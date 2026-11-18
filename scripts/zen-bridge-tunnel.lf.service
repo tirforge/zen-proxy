@@ -1,0 +1,14 @@
+[Unit]
+Description=Public HTTPS tunnel for the zen-proxy bridge
+After=network-online.target zen-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:20129
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

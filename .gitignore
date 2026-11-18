@@ -7,3 +7,6 @@ zen-proxy.json
 free-models.json
 *.log
 .DS_Store
+
+# Local runtime output
+logs/

@@ -165,6 +165,20 @@ if (!loadConfigFile() && !IS_VERCEL && !kvEnabled) {
   } catch {}
 }
 
+// Hosted deployments cannot run the Bun bridge, so BRIDGE_URL must point at
+// one that runs elsewhere. When the env var is missing or still loopback, fall
+// back to the public URL committed in bridge-url.txt: that lets a Vercel
+// deployment follow the bridge without editing project settings.
+if (IS_VERCEL) {
+  try {
+    const fallback = fs.readFileSync(path.join(__dirname, "bridge-url.txt"), "utf8").trim()
+    const current = new URL(config.bridgeUrl)
+    if (/^https?:\/\//i.test(fallback) && isLocalHost(current.hostname)) {
+      config.bridgeUrl = fallback.replace(/\/$/, "")
+    }
+  } catch {}
+}
+
 let hydrated = !kvEnabled
 let hydratePromise = null
 
