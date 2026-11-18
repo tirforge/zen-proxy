@@ -14,6 +14,7 @@
 import http from "node:http"
 import fs from "node:fs"
 import path from "node:path"
+import crypto from "node:crypto"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
 
@@ -1066,6 +1067,49 @@ const handleRequest = async (req, res) => {
 
   // Diagnostic: shows what the function really received after the rewrite.
   // No secrets are echoed (authorization/cookie are stripped).
+  // Diagnostic: can this Node runtime talk to OpenCode directly? The free-tier
+  // gate inspects the TLS ClientHello, so this proves whether the platform's
+  // egress is accepted before we build a direct (bridge-less) upstream path.
+  if (pathname === "/api/_direct") {
+    if (!isAuthorized(req)) return sendJson(res, 401, { error: "unauthorized" })
+    const url = "https://opencode.ai/inference/openai/v1/chat/completions"
+    const sessionId = "ses_" + crypto.randomBytes(12).toString("hex")
+    const body = JSON.stringify({
+      model: config.defaultModel || "big-pickle",
+      messages: [{ role: "user", content: "Reply with exactly: ok" }],
+      stream: false,
+    })
+    const started = Date.now()
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "*/*",
+          authorization: "Bearer public",
+          "user-agent": "opencode/latest/2.0.32/cli",
+          "x-opencode-client": "cli",
+          "x-opencode-project": crypto.createHash("sha1").update("directory:" + __dirname).digest("hex"),
+          "x-opencode-session": sessionId,
+          "x-opencode-session-id": sessionId,
+          "x-session-affinity": sessionId,
+          "x-session-id": sessionId,
+        },
+        body,
+        signal: AbortSignal.timeout(45000),
+      })
+      const text = await r.text()
+      return sendJson(res, 200, {
+        status: r.status,
+        ms: Date.now() - started,
+        apns: r.headers.get("cf-ray") ? "cloudflare" : null,
+        body: text.slice(0, 800),
+      })
+    } catch (e) {
+      return sendJson(res, 200, { error: String(e?.message || e), ms: Date.now() - started })
+    }
+  }
+
   if (pathname === "/api/_debug") {
     const headers = {}
     for (const [k, v] of Object.entries(req.headers)) {
