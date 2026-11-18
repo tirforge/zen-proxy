@@ -1,0 +1,6 @@
+[14:40:10] zen-proxy dashboard on http://127.0.0.1:8787
+[14:40:10] bridge backend http://127.0.0.1:20129
+[14:40:10] starting bridge: C:\Users\Thirupathi\.bun\bin\bun.exe server.js (port 20129)
+[14:40:10] bridge: [opencode-free-bridge] v2.4.0 listening on http://127.0.0.1:20129
+[14:40:10] bridge is up
+[14:40:11] bridge: [opencode-free-bridge] Auto-discovered 11 free models from upstream gateway.

@@ -227,7 +227,7 @@ function log(msg) {
   const at = new Date().toISOString().slice(11, 19)
   logs.push({ at, msg })
   if (logs.length > 800) logs.splice(0, logs.length - 800)
-  console.log(`[${at}] ${msg}`)
+  try { console.log(`[${at}] ${msg}`) } catch {}
 }
 
 function isLocalHost(value) {
@@ -1257,4 +1257,15 @@ if (!IS_VERCEL) {
 // A background failure (bridge watchdog, config write, stream) must not take
 // the dashboard down with it.
 process.on("unhandledRejection", (e) => log(`unhandled rejection: ${e?.stack || e?.message || e}`))
-process.on("uncaughtException", (e) => log(`uncaught exception: ${e?.stack || e?.message || e}`))
+process.on("uncaughtException", (e) => {
+  // A closed stdout pipe (console window gone, terminal restarted) is not a
+  // failure of this process; logging it would just recurse into the same pipe.
+  if (e?.code === "EPIPE") return
+  log(`uncaught exception: ${e?.stack || e?.message || e}`)
+})
+// Same reason: a dead stdout/stderr must never turn into an exception storm.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on("error", (e) => {
+    if (e?.code !== "EPIPE") throw e
+  })
+}
