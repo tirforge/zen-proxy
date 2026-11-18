@@ -391,11 +391,12 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
         <div class="card"><div class="label">Bridge</div><div class="value mono" id="brVersion">–</div><div class="sub" id="brRuntime">–</div></div>
         <div class="card"><div class="label">Free models</div><div class="value" id="brModels">–</div><div class="sub">discovered by bridge</div></div>
         <div class="card"><div class="label">Egress</div><div class="value mono" id="brEgress">–</div><div class="sub mono" id="brGate">–</div></div>
+        <div class="card"><div class="label">Mode</div><div class="value mono" id="brMode">–</div><div class="sub" id="brTarget">–</div></div>
       </div>
       <div class="row" style="gap:10px;flex-wrap:wrap">
         <button onclick="openBridgePanel()">◱ Bridge egress panel</button>
-        <button onclick="openWebUI()">◈ OpenCode web UI</button>
-        <button onclick="pairOpencode()">🔗 Pair OpenCode</button>
+        <button id="btnWebUI" onclick="openWebUI()">◈ OpenCode web UI</button>
+        <button id="btnPair" onclick="pairOpencode()">🔗 Pair OpenCode</button>
         <button onclick="restartBridge()">↻ Restart bridge</button>
       </div>
       <div id="pairOut" class="hint mono" style="margin-top:14px;word-break:break-all"></div>
@@ -423,47 +424,29 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
 
   <section class="tab" id="tab-config">
     <div class="panel">
-      <h2><span class="hh">Server settings</span><span class="sticker coral" style="transform:none">port / host need restart</span></h2>
+      <h2><span class="hh">Server settings</span><span class="sticker coral" style="transform:none">host / port need restart</span></h2>
       <div class="formgrid">
         <div>
           <label>Host</label><input id="cfgHost" type="text">
           <label>Port</label><input id="cfgPort" type="number">
-          <label>Upstream url</label><input id="cfgUpstream" type="text">
-          <label>User-agent (the unlock)</label><input id="cfgUa" type="text">
+          <label>Bridge URL <span class="hint">(the Bun backend; remote is fine)</span></label><input id="cfgBridgeUrl" type="text">
+          <label>Bridge directory <span class="hint">(local auto-start only)</span></label><input id="cfgBridgeDir" type="text">
         </div>
         <div>
-          <label>Default model <span class="hint">(empty = auto-pick healthy free model)</span></label><input id="cfgDefault" type="text">
-          <label>Proxy key (empty = open)</label><input id="cfgProxyKey" type="password" autocomplete="new-password">
-          <label>Zen key (byok, optional)</label><input id="cfgZenKey" type="password" autocomplete="new-password">
-          <div class="row" style="gap:8px;margin-top:2px">
-            <button type="button" class="primary" onclick="testZenKey()" style="font-size:11px;padding:6px 10px">Test key</button>
-            <span class="hint mono" id="cfgAuth"></span>
-            <span class="hint" id="zenKeyHint" style="min-height:16px"></span>
-          </div>
-          <label>Timeout (ms)</label><input id="cfgTimeout" type="number">
+          <label>Default model <span class="hint">(empty = bridge's first free model)</span></label><input id="cfgDefault" type="text">
+          <label>Proxy key <span class="hint" id="cfgKeyHint">(required when hosted)</span></label><input id="cfgProxyKey" type="password" autocomplete="new-password">
+          <div class="checkbox" style="margin-top:14px"><input type="checkbox" id="cfgAutoStart"><span>Auto-start the bridge under Bun when it is down</span></div>
+          <div class="checkbox"><input type="checkbox" id="cfgAllModels"><span><b>All-models mode</b> — accept any model id and route it to a free one</span></div>
+          <label>All-models fallback target</label><input id="cfgAllTarget" type="text" list="modelDatalist">
+          <datalist id="modelDatalist"></datalist>
         </div>
       </div>
-      <label>Fallback models (json array — tried in order on 429/5xx)</label>
+      <label>Effort variants <span class="hint">(comma separated; a request for <code>model#high</code> becomes <code>reasoning_effort: high</code>)</span></label>
+      <input id="cfgEfforts" type="text" placeholder="minimal, low, medium, high, max">
+      <label>Fallback models (json array)</label>
       <textarea id="cfgFallback"></textarea>
-      <label>Model aliases (json map — e.g. {"gpt-4o":"space-bunny-free"})</label>
+      <label>Model aliases (json map — e.g. {"gpt-4o":"beam-free"})</label>
       <textarea id="cfgAliases"></textarea>
-      <div class="checkbox"><input type="checkbox" id="cfgTrust"><span>Trust <code>x-forwarded-for</code> from a reverse proxy</span></div>
-      <div class="checkbox"><input type="checkbox" id="cfgAutoSync"><span>Auto-sync models (probe upstream free models, prune dead ones)</span></div>
-      <label>Auto-sync interval (ms)</label><input id="cfgSyncMs" type="number">
-      <label>Health-probe credentials</label>
-      <select id="cfgProbeAuth" style="width:100%">
-        <option value="auto">Auto — use my Zen key if set, else anonymous</option>
-        <option value="anonymous">Always anonymous (public free tier)</option>
-        <option value="key">Always my Zen key (tests my own quota)</option>
-      </select>
-      <div class="checkbox"><input type="checkbox" id="cfgAutoUA"><span>Auto-track opencode releases &amp; update the User-Agent</span></div>
-      <label>User-agent refresh interval (ms)</label><input id="cfgUaMs" type="number">
-      <div class="checkbox"><input type="checkbox" id="cfgInject"><span>Inject <code>x-opencode-session</code> header per client (free tier needs it)</span></div>
-      <div class="checkbox"><input type="checkbox" id="cfgRateLimit"><span>Rate-limit chat requests per client (0 = off)</span></div>
-      <div class="row" style="gap:10px;margin-top:6px">
-        <div><label>Requests / window</label><input id="cfgRateMax" type="number" min="0" style="width:120px"></div>
-        <div><label>Window (ms)</label><input id="cfgRateWindow" type="number" min="1000" style="width:140px"></div>
-      </div>
       <label>Responses-API models (json array — patterns may end in *)</label>
       <textarea id="cfgResponses"></textarea>
       <div class="row" style="margin-top:22px">
@@ -471,6 +454,7 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
         <button onclick="reloadConfig()">Discard / reload</button>
         <button onclick="restoreModels()" title="Re-add any model the proxy is missing (keeps your keys)">Restore model list</button>
       </div>
+      <p class="hint" id="cfgDeploy" style="margin-top:14px"></p>
     </div>
   </section>
 
@@ -488,7 +472,6 @@ textarea { resize:vertical; min-height:96px; font-family:var(--mono); font-size:
 const $ = (id) => document.getElementById(id)
 let key = localStorage.getItem("zpKey") || ""
 let config = null
-let savedZenKeyMasked = ""
 
 function api(path, opts = {}) {
   const headers = { ...(opts.headers || {}) }
@@ -571,7 +554,17 @@ async function refreshStatus() {
       $("brModels").textContent = b.discoveredModels != null ? b.discoveredModels : "–"
       $("brEgress").textContent = b.egress || "direct"
       $("brGate").textContent = b.url || ""
-      if (down) {
+      $("brMode").textContent = st.allModels ? "all-models" : "strict"
+      $("brTarget").textContent = st.allModels ? "→ " + (st.allModelsTarget || "default") : "unknown models rejected"
+      if (st.deployment && st.deployment.vercel) {
+        for (const id of ["btnWebUI", "btnPair"]) {
+          const el = $(id)
+          if (el) el.style.display = "none"
+        }
+      }
+      if (st.deployment && st.deployment.bridgeMisconfigured) {
+        showBanner("This deployment is hosted, so BRIDGE_URL must point at your Bun bridge (loopback cannot work on Vercel).")
+      } else if (down) {
         showBanner("Bridge backend is not responding" + (b.lastError ? " — " + b.lastError : "") + ". Is Bun installed? The watchdog retries every 15s.")
       } else {
         hideBanner()
@@ -740,26 +733,6 @@ async function syncNow() {
   refreshModels()
 }
 
-async function testZenKey() {
-  const hint = $("zenKeyHint")
-  hint.textContent = "testing…"
-  const zenKey = $("cfgZenKey").value
-  const body = { model: $("cfgDefault").value.trim() || (config && config.fallbackModels ? config.fallbackModels[0] : "") }
-  if (zenKey && zenKey !== savedZenKeyMasked) body.zenKey = zenKey
-  try {
-    const r = await api("/api/test", { method: "POST", body: JSON.stringify(body) })
-    if (r.gated) {
-      hint.innerHTML = '<span style="color:var(--mut)">◦ key accepted, model is agent-only</span>'
-      toast("Key reached the free tier (model is agent-only)", "ok")
-    } else {
-      hint.innerHTML = r.ok
-        ? '<span style="color:var(--ink)">✓ works (' + r.model + ")</span>"
-        : '<span style="color:var(--coral)">✗ ' + r.status + " " + escapeHtml(String(r.detail || "").slice(0, 80)) + "</span>"
-      toast(r.ok ? "Key works: " + r.model : "Key rejected (" + r.status + ")", r.ok ? "ok" : "bad")
-    }
-  } catch (e) { hint.textContent = "test failed"; toast("Test failed", "bad") }
-}
-
 async function addModel(preset) {
   const m = (preset || $("newModel").value).trim()
   if (!m) return
@@ -782,72 +755,69 @@ async function removeModel(m) {
 
 async function populateConfigForm() {
   if (!config) config = (await api("/api/config")).config
-  savedZenKeyMasked = config.defaultZenKey || ""
-  $("cfgHost").value = config.host
-  $("cfgPort").value = config.port
-  $("cfgUpstream").value = config.upstream
-  $("cfgUa").value = config.ua
-  $("cfgDefault").value = config.defaultModel
-  $("cfgDefault").placeholder = "(auto)"
-  $("cfgProxyKey").value = config.proxyKey === "••••••••" ? "" : config.proxyKey
-  $("cfgZenKey").value = savedZenKeyMasked
-  $("cfgTimeout").value = config.timeoutMs
-  $("cfgFallback").value = JSON.stringify(config.fallbackModels, null, 2)
-  $("cfgAliases").value = JSON.stringify(config.modelAliases, null, 2)
-  $("cfgTrust").checked = !!config.trustForwarded
-  $("cfgAutoSync").checked = config.autoSync !== false
-  $("cfgSyncMs").value = config.autoSyncIntervalMs ?? 3600000
-  $("cfgProbeAuth").value = ["auto", "key", "anonymous"].includes(config.probeAuth) ? config.probeAuth : "auto"
-  $("cfgAutoUA").checked = config.autoUA !== false
-  $("cfgUaMs").value = config.uaRefreshMs ?? 21600000
-  $("cfgInject").checked = config.injectSession !== false
-  $("cfgRateLimit").checked = Number(config.rateLimitMax) > 0
-  $("cfgRateMax").value = config.rateLimitMax ?? 0
-  $("cfgRateWindow").value = config.rateLimitWindowMs ?? 60000
-  $("cfgResponses").value = JSON.stringify(config.responsesModels ?? [], null, 2)
+  $("cfgHost").value = config.host ?? ""
+  $("cfgPort").value = config.port ?? 8787
+  $("cfgBridgeUrl").value = config.bridgeUrl ?? ""
+  $("cfgBridgeDir").value = config.bridgeDir ?? ""
+  $("cfgDefault").value = config.defaultModel || ""
+  $("cfgProxyKey").value = config.proxyKey || ""
+  $("cfgAutoStart").checked = config.autoStartBridge !== false
+  $("cfgAllModels").checked = !!config.allModels
+  $("cfgAllTarget").value = config.allModelsTarget || ""
+  $("cfgEfforts").value = (config.effortVariants || []).join(", ")
+  $("cfgFallback").value = JSON.stringify(config.fallbackModels || [], null, 2)
+  $("cfgAliases").value = JSON.stringify(config.modelAliases || {}, null, 2)
+  $("cfgResponses").value = JSON.stringify(config.responsesModels || [], null, 2)
   try {
     const st = await api("/api/status")
-    const auth = st.auth || {}
-    const modeLabel =
-      auth.mode === "proxy+byok" ? "proxy key + your zen key"
-      : auth.mode === "byok" ? "your zen key"
-      : auth.mode === "proxy" ? "proxy key"
-      : "anonymous public"
-    const eff = st.effectiveDefault ? " · auto→" + st.effectiveDefault : ""
-    $("cfgDefault").placeholder = eff ? "auto → " + st.effectiveDefault : "(auto)"
-    $("cfgAuth").textContent = "auth: " + modeLabel + (auth.zenKey ? " (" + auth.zenKey + ")" : "") + eff
+    const d = st.deployment || {}
+    $("cfgDeploy").textContent = d.vercel
+      ? "Running on Vercel: saves above apply to this instance only. Put the durable values in environment variables (PROXY_KEY, BRIDGE_URL, ALL_MODELS, DEFAULT_MODEL)."
+      : d.remoteBridge
+        ? "Remote bridge: " + (config.bridgeUrl || "") + " — it must be reachable and running under Bun."
+        : "Local deployment — config is written to zen-proxy.json."
+    $("cfgKeyHint").textContent = d.keyMissing
+      ? "(required — this deployment is public)"
+      : config.proxyKey
+        ? "(set)"
+        : "(empty = open, loopback only)"
+    const dl = $("modelDatalist")
+    if (dl) {
+      dl.innerHTML = (st.models && st.models.served ? st.models.served : [])
+        .map((m) => `<option value="${escapeAttr(m)}"></option>`)
+        .join("")
+    }
   } catch {}
 }
 
 async function saveConfig() {
+  let fallbackModels, modelAliases, responsesModels
+  try { fallbackModels = JSON.parse($("cfgFallback").value || "[]") } catch { toast("Invalid JSON — fallback models", "bad"); return }
+  try { modelAliases = JSON.parse($("cfgAliases").value || "{}") } catch { toast("Invalid JSON — model aliases", "bad"); return }
+  try { responsesModels = JSON.parse($("cfgResponses").value || "[]") } catch { toast("Invalid JSON — responses models", "bad"); return }
+
   const body = {
-    host: $("cfgHost").value.trim() || "0.0.0.0",
+    host: $("cfgHost").value.trim() || "127.0.0.1",
     port: Number($("cfgPort").value || 8787),
-    upstream: $("cfgUpstream").value.trim(),
-    ua: $("cfgUa").value.trim(),
+    bridgeUrl: $("cfgBridgeUrl").value.trim(),
+    bridgeDir: $("cfgBridgeDir").value.trim(),
     defaultModel: $("cfgDefault").value.trim(),
     proxyKey: $("cfgProxyKey").value,
-    timeoutMs: Number($("cfgTimeout").value || 120000),
-    fallbackModels: JSON.parse($("cfgFallback").value || "[]"),
-    modelAliases: JSON.parse($("cfgAliases").value || "{}"),
-    trustForwarded: $("cfgTrust").checked,
-    autoSync: $("cfgAutoSync").checked,
-    autoSyncIntervalMs: Number($("cfgSyncMs").value || 3600000),
-    probeAuth: $("cfgProbeAuth").value,
-    autoUA: $("cfgAutoUA").checked,
-    uaRefreshMs: Number($("cfgUaMs").value || 21600000),
-    injectSession: $("cfgInject").checked,
-    rateLimitMax: $("cfgRateLimit").checked ? Number($("cfgRateMax").value || 0) : 0,
-    rateLimitWindowMs: Number($("cfgRateWindow").value || 60000),
+    autoStartBridge: $("cfgAutoStart").checked,
+    allModels: $("cfgAllModels").checked,
+    allModelsTarget: $("cfgAllTarget").value.trim(),
+    effortVariants: $("cfgEfforts").value.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
+    fallbackModels,
+    modelAliases,
+    responsesModels,
   }
-  try { body.responsesModels = JSON.parse($("cfgResponses").value || "[]") } catch { toast("Invalid JSON — responses models", "bad"); return }
-  if ($("cfgZenKey").value !== savedZenKeyMasked) body.defaultZenKey = $("cfgZenKey").value
   try {
-    await api("/api/config", { method: "PUT", body: JSON.stringify(body) })
-    toast("Saved & applied")
+    const r = await api("/api/config", { method: "PUT", body: JSON.stringify(body) })
+    if (r && r.persisted === false) toast("Applied to this instance — set env vars to persist", "bad")
+    else toast("Saved & applied")
     config = null
     refreshAll()
-  } catch (e) { toast("Invalid JSON — check config", "bad") }
+  } catch (e) { toast("Save failed — check the values", "bad") }
 }
 
 async function restoreModels() {

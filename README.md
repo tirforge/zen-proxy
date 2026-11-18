@@ -42,14 +42,56 @@ Point any agent at the dashboard — not directly at the bridge:
 | Setting | Value |
 |---|---|
 | Base URL | `http://127.0.0.1:8787/v1` |
-| API key | `public` |
+| API key | `public` (or your `PROXY_KEY` once set) |
 | Model | any id from `GET /v1/models` |
+
+## Deploying on Vercel
+
+Vercel runs Node functions, and the free-tier gate refuses Node's TLS
+fingerprint — so the bridge **cannot** run there. Deploy the dashboard/proxy on
+Vercel and point it at a bridge you run somewhere with Bun (VPS, home server,
+tunnel):
+
+```
+browser ──► Vercel (dashboard + /v1 proxy) ──► https://your-host:20129 (Bun bridge) ──► opencode
+```
+
+1. Import `tirforge/zen-proxy` in Vercel. No build step: `index.html`, `assets/`
+   are static and `api/index.mjs` is the function (wired by `vercel.json`).
+2. Set environment variables in the project settings:
+
+| Variable | Required | Example |
+|---|---|---|
+| `PROXY_KEY` | **yes** | a long random string — the dashboard and `/v1` stay locked without it |
+| `BRIDGE_URL` | **yes** | `https://bridge.example.com` (public URL of your Bun bridge) |
+| `ALL_MODELS` | no | `1` enables all-models mode by default |
+| `DEFAULT_MODEL` | no | `nemotron-3.5-lightning-free` |
+| `HOST` / `PORT` | no | ignored on Vercel |
+| `FALLBACK_MODELS`, `MODEL_ALIASES`, `RESPONSES_MODELS` | no | JSON |
+
+3. On the bridge host, start it so the Vercel function can reach it:
+   `PANEL_ALLOWED_HOSTS=bridge.example.com PORT=20129 bun server.js`
+   (put it behind HTTPS/Caddy/Cloudflare; never expose a bare port to the world
+   without a proxy). If you also want the egress panel reachable from the
+   dashboard, allow that hostname in `PANEL_ALLOWED_HOSTS`.
+
+Notes for the hosted setup:
+
+- `PROXY_KEY` is enforced for `/v1/*` and `/api/*`; `/health` stays open. With no
+  key on a public deployment the app answers `503 proxy_key_missing` instead of
+  silently serving the free quota to anyone.
+- The OpenCode web UI / pair buttons are local-only and are hidden on Vercel.
+- The dashboard's Save button writes to memory only there (read-only
+  filesystem); set the environment variables above to persist.
+- Functions time out after 60s (`vercel.json`), so very long generations are
+  cut off by the platform.
 
 ## What the dashboard adds over the bridge alone
 
 - **Overview** — requests served, upstream health, bridge gate state, live feed
 - **Models** — every free model the bridge discovered, one-click test, default model
-- **Settings** — default/fallback models, aliases, proxy key, bridge URL
+- **Settings** — bridge URL, default model, all-models mode + target, effort
+  variants, aliases, proxy key, fallback models
 - **Logs** — request log tail
 - **Bridge backend card** — bridge version/runtime, egress mode, gate status,
   restart count; turns red with a banner if the bridge stops answering
@@ -78,7 +120,7 @@ Point any agent at the dashboard — not directly at the bridge:
 | `POST` | `/v1/chat/completions` | proxied to the bridge (OpenAI Chat) |
 | `POST` | `/v1/responses` | proxied (OpenAI Responses) |
 | `POST` | `/v1/messages` | proxied (Anthropic Messages) |
-| `GET` | `/v1/models` | proxied model list |
+| `GET` | `/v1/models` | model list (expanded with `#effort` variants in all-models mode) |
 | `GET` | `/` | dashboard |
 | `GET` | `/health` | dashboard health |
 | `GET`/`PUT` | `/api/config` | read / update `zen-proxy.json` |
@@ -96,16 +138,63 @@ Point any agent at the dashboard — not directly at the bridge:
 | Key | Default | Description |
 |---|---|---|
 | `host` / `port` | `127.0.0.1` / `8787` | Dashboard bind (restart required) |
-| `bridgeUrl` | `http://127.0.0.1:20129` | Bridge backend |
+| `bridgeUrl` | `http://127.0.0.1:20129` | Bridge backend (loopback or remote) |
 | `bridgeDir` | `bridge` | Vendored bridge location |
-| `autoStartBridge` | `true` | Spawn the bridge if it is not listening |
+| `autoStartBridge` | `true` | Spawn the bridge if it is not listening (local only) |
 | `defaultModel` | `""` | Model used when a request asks for an unknown id |
 | `fallbackModels` | `[]` | Filled by the first sync when empty |
 | `modelAliases` | `{}` | e.g. `{"gpt-4o":"beam-free"}` |
 | `proxyKey` | `""` | Require a bearer key for `/v1/*` and `/api/*` |
+| `allModels` | `false` | All-models mode (see below) |
+| `allModelsTarget` | `nemotron-3.5-lightning-free` | Model unknown ids are routed to |
+| `effortVariants` | `minimal, low, medium, high, max` | `#effort` suffixes exposed and accepted |
 
 Dashboard writes are same-origin only and require JSON, so a random web page
 cannot rewrite your config.
+
+### Environment variables (old names, still supported)
+
+The original zen-proxy variable names are kept and win over the JSON file, which
+is what a Vercel deployment uses (read-only filesystem):
+
+| Variable | Maps to |
+|---|---|
+| `HOST`, `PORT` | bind address |
+| `PROXY_KEY` | `proxyKey` |
+| `DEFAULT_MODEL` | `defaultModel` |
+| `BRIDGE_URL` | `bridgeUrl` |
+| `BRIDGE_DIR` | `bridgeDir` |
+| `AUTO_START_BRIDGE` (`0` disables) | `autoStartBridge` |
+| `ALL_MODELS` (`1` enables) | `allModels` |
+| `ALL_MODELS_TARGET` | `allModelsTarget` |
+| `FALLBACK_MODELS` | JSON array or comma list |
+| `MODEL_ALIASES` | JSON map |
+| `RESPONSES_MODELS` | JSON array or comma list |
+| `ZEN_PROXY_CONFIG` | config file path |
+
+## All-models mode
+
+Set `ALL_MODELS=1` (env) or tick **All-models mode** in Settings when you want any
+model name to work, not just the 11 free catalog ids:
+
+- `/v1/models` lists every free model plus its `#effort` variants
+  (`beam-free#high`, `nemotron-3.5-lightning-free#low`, …).
+- A request for `model#effort` is routed to that model and the effort is sent
+  upstream as `reasoning_effort` (the bridge already forwards it; models that do
+  not reason simply ignore it).
+- A request for a model the catalog does not have (`gpt-4o`, `claude-3-5-sonnet`,
+  `grok-2`, anything else) is answered by the closest free model — `gpt-*` and
+  `o1..o4` go to `deepseek-v4.1-flash-free`, Claude/Grok to `beam-free`,
+  Gemini/Gemma to `nemotron-3.5-super-vl-free`, and so on — falling back to
+  `allModelsTarget` for unknown families.
+- The JSON response keeps the model name you asked for and adds
+  `zen_served_by` (plus an `x-zen-served-by` header) so you can see which free
+  model actually answered. Streaming responses carry the header only.
+
+Caveat: these are still the free models. Asking for `gpt-5#max` gets you a free
+model doing its best — it is not GPT-5. Without all-models mode an unknown id is
+rejected by the bridge with `400 Model is unavailable` (or routed to
+`defaultModel` if you set one).
 
 ## Using the free models from OpenCode itself
 

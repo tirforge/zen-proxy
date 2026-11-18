@@ -2,12 +2,14 @@
 // zen-proxy · dashboard + bridge
 //
 // Serves the zen-proxy dashboard (public/index.html) and hands every /v1/*
-// request to a local opencode-free-bridge instance, which does the actual
-// upstream work (v2 gate shape, identity, fallbacks, egress pool).
+// request to an opencode-free-bridge instance, which does the actual upstream
+// work (v2 gate shape, identity, fallbacks, egress pool).
 //
-//   node server.mjs          # or: bun server.mjs
+//   node server.mjs          # local: auto-starts the bridge under Bun
 //
-// The bridge is auto-started on first boot when it is not already listening.
+// On Vercel the bridge cannot run (the free-tier gate refuses Node's TLS
+// fingerprint), so the deployment acts as dashboard + reverse proxy in front of
+// a bridge you run elsewhere: set BRIDGE_URL to a reachable bridge.
 
 import http from "node:http"
 import fs from "node:fs"
@@ -17,6 +19,7 @@ import { fileURLToPath } from "node:url"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const CONFIG_PATH = process.env.ZEN_PROXY_CONFIG || path.join(__dirname, "zen-proxy.json")
+const IS_VERCEL = !!process.env.VERCEL
 
 const DEFAULTS = {
   host: "127.0.0.1",
@@ -29,16 +32,74 @@ const DEFAULTS = {
   modelAliases: {},
   responsesModels: ["gpt-5*", "gpt-6*", "grok-*", "muse-spark-*"],
   proxyKey: "",
+  // "all models" mode: accept any model id (including ones the catalog does not
+  // have) and any effort suffix (`model#high`), routing them to a real free
+  // model instead of failing with "Model is unavailable".
+  allModels: false,
+  allModelsTarget: "nemotron-3.5-lightning-free",
+  effortVariants: ["minimal", "low", "medium", "high", "max"],
+}
+
+// Old zen-proxy environment names, kept for drop-in compatibility. They are
+// re-applied on every boot and win over zen-proxy.json.
+const ENV_MAP = {
+  HOST: (v) => ({ host: v }),
+  PORT: (v) => (Number(v) > 0 ? { port: Number(v) } : {}),
+  PROXY_KEY: (v) => ({ proxyKey: v }),
+  DEFAULT_MODEL: (v) => ({ defaultModel: v }),
+  BRIDGE_URL: (v) => ({ bridgeUrl: v.replace(/\/$/, "") }),
+  BRIDGE_DIR: (v) => ({ bridgeDir: v }),
+  AUTO_START_BRIDGE: (v) => ({ autoStartBridge: v !== "0" }),
+  ALL_MODELS: (v) => ({ allModels: v !== "0" && v !== "" }),
+  ALL_MODELS_TARGET: (v) => ({ allModelsTarget: v }),
+}
+
+const JSON_ENV_MAP = {
+  FALLBACK_MODELS: "fallbackModels",
+  MODEL_ALIASES: "modelAliases",
+  RESPONSES_MODELS: "responsesModels",
+}
+
+function parseList(value) {
+  const raw = String(value).trim()
+  if (!raw) return null
+  if (raw.startsWith("[") || raw.startsWith("{")) {
+    try {
+      return JSON.parse(raw)
+    } catch {
+      return null
+    }
+  }
+  const list = raw.split(",").map((s) => s.trim()).filter(Boolean)
+  return list.length ? list : null
+}
+
+function applyEnv(base) {
+  const next = { ...base }
+  for (const [name, fn] of Object.entries(ENV_MAP)) {
+    const v = process.env[name]
+    if (v !== undefined && v !== "") Object.assign(next, fn(v))
+  }
+  for (const [name, key] of Object.entries(JSON_ENV_MAP)) {
+    const parsed = parseList(process.env[name] || "")
+    if (parsed && typeof parsed === "object") next[key] = parsed
+  }
+  return next
 }
 
 function loadConfig() {
+  let file = {}
   try {
-    const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"))
-    return { ...DEFAULTS, ...raw }
+    file = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"))
   } catch {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULTS, null, 2) + "\n")
-    return { ...DEFAULTS }
+    // Serverless filesystems are read-only; only persist locally.
+    if (!IS_VERCEL) {
+      try {
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULTS, null, 2) + "\n")
+      } catch {}
+    }
   }
+  return applyEnv({ ...DEFAULTS, ...file })
 }
 
 let config = loadConfig()
@@ -54,12 +115,29 @@ function log(msg) {
   console.log(`[${at}] ${msg}`)
 }
 
+function isLocalHost(value) {
+  const h = String(value || "").toLowerCase()
+  return h === "127.0.0.1" || h === "localhost" || h === "::1" || h === "[::1]"
+}
+
+// Anything that is not loopback is reachable by other people, so it must never
+// be served without a key. On Vercel that is always true.
+function hostedExposure() {
+  return IS_VERCEL || !isLocalHost(config.host)
+}
+
 function isAuthorized(req) {
-  if (!config.proxyKey) return true
+  if (!config.proxyKey) return !hostedExposure()
   const auth = req.headers.authorization || ""
   const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : ""
   const headerKey = req.headers["x-api-key"] || ""
   return bearer === config.proxyKey || headerKey === config.proxyKey
+}
+
+// Distinct from isAuthorized so hosted-without-key gets an actionable error
+// instead of a bare 401 the dashboard cannot explain.
+function authMisconfigured() {
+  return !config.proxyKey && hostedExposure()
 }
 
 function sendJson(res, code, obj) {
@@ -142,6 +220,17 @@ async function bridgeAlive() {
   }
 }
 
+// The bridge only runs under Bun next to the dashboard. When BRIDGE_URL points
+// somewhere else (a VPS, a tunnel, another host) this process is a pure
+// reverse proxy and must never try to spawn anything.
+function bridgeIsLocal() {
+  try {
+    return isLocalHost(new URL(config.bridgeUrl).hostname)
+  } catch {
+    return false
+  }
+}
+
 const bridgeState = { up: false, lastCheck: 0, restarts: 0, lastError: null, starting: false }
 
 async function ensureBridge() {
@@ -153,6 +242,11 @@ async function ensureBridge() {
   }
   bridgeState.up = false
   bridgeState.lastCheck = Date.now()
+  if (!bridgeIsLocal() || IS_VERCEL) {
+    bridgeState.lastError = "remote bridge unreachable — check BRIDGE_URL"
+    log(bridgeState.lastError)
+    return false
+  }
   if (!config.autoStartBridge) {
     log("bridge not running and autoStartBridge is off")
     bridgeState.lastError = "autoStartBridge is off"
@@ -213,6 +307,10 @@ function startWatchdog() {
     const wasUp = bridgeState.up
     bridgeState.up = false
     if (!config.autoStartBridge || bridgeState.starting) return
+    if (!bridgeIsLocal() || IS_VERCEL) {
+      bridgeState.lastError = "remote bridge unreachable — check BRIDGE_URL"
+      return
+    }
     if (Date.now() - lastRestartAttempt < 30000) return
     lastRestartAttempt = Date.now()
     log(wasUp ? "bridge stopped responding — restarting" : "bridge is down — attempting restart")
@@ -304,6 +402,16 @@ async function buildStatus() {
     upstream,
     ua,
     uaAutoVersion,
+    deployment: {
+      hosted: hostedExposure(),
+      vercel: IS_VERCEL,
+      remoteBridge: !bridgeIsLocal() || IS_VERCEL,
+      bridgeMisconfigured: IS_VERCEL && bridgeIsLocal(),
+      keyRequired: !!config.proxyKey,
+      keyMissing: authMisconfigured(),
+    },
+    allModels: !!config.allModels,
+    allModelsTarget: config.allModelsTarget,
     uptime: Math.floor((now - startedAt) / 1000),
     requests: {
       total: counters.total,
@@ -343,7 +451,53 @@ async function buildStatus() {
 
 // ---------------------------------------------------------------- /v1 proxy
 
+// Models that exist in the wider ecosystem but not in the free catalog. In
+// all-models mode a request for one of these is answered by the closest free
+// model instead of a 400 "Model is unavailable".
+const FAMILY_ROUTES = [
+  [/^(gpt-|chatgpt|openai\/|o[1-4](-|$))/i, "deepseek-v4.1-flash-free"],
+  [/^(claude|anthropic\/|sonnet|opus|haiku)/i, "beam-free"],
+  [/^(grok|xai\/)/i, "beam-free"],
+  [/^(gemini|google\/|gemma)/i, "nemotron-3.5-super-vl-free"],
+  [/^(qwen|deepseek|kimi|moonshot|glm|z-?ai\/)/i, "deepseek-v4.1-flash-free"],
+  [/^(llama|meta\/|mistral|codestral|mixtral)/i, "flint-40b-free"],
+]
+
+const EFFORT_SUFFIX = /#(minimal|low|medium|high|max)$/i
+
+function splitEffort(model) {
+  const m = String(model || "")
+  const match = m.match(EFFORT_SUFFIX)
+  if (!match) return { base: m, effort: "" }
+  return { base: m.slice(0, -match[0].length), effort: match[1].toLowerCase() }
+}
+
+function pickFamilyRoute(model) {
+  for (const [re, target] of FAMILY_ROUTES) if (re.test(model)) return target
+  return ""
+}
+
+function expandedModelList(entries) {
+  if (!config.allModels) return entries
+  const out = []
+  for (const entry of entries) {
+    out.push(entry)
+    for (const effort of config.effortVariants || []) {
+      out.push({ ...entry, id: `${entry.id}#${effort}`, x_effort: effort })
+    }
+  }
+  return out
+}
+
 async function proxyV1(req, res) {
+  if (authMisconfigured()) {
+    return sendJson(res, 503, {
+      error: {
+        type: "unauthorized",
+        message: "PROXY_KEY is not set. This deployment is publicly reachable, so it refuses to serve until you set it.",
+      },
+    })
+  }
   if (!isAuthorized(req)) {
     return sendJson(res, 401, { error: { type: "unauthorized", message: "proxy key required" } })
   }
@@ -359,26 +513,47 @@ async function proxyV1(req, res) {
   }
   let body = chunks.length ? Buffer.concat(chunks) : undefined
   let model = ""
+  let requestedModel = ""
+  let servedBy = ""
 
-  // Apply model routing from config: aliases first, then defaultModel for an
-  // unknown/absent id. Without this the dashboard's alias + default settings
-  // were written but never used, and an alias upstream rejects 400s.
+  // Model routing: effort suffix (`#high`), aliases, then all-models family
+  // routing, then defaultModel for an unknown id. Without this the dashboard's
+  // alias + default settings were written but never used, and an alias
+  // upstream rejects 400s.
   if (body && /json/.test(req.headers["content-type"] || "") && /\/v1\/(chat\/completions|responses|messages)$/.test(req.url.split("?")[0])) {
     try {
       const parsed = JSON.parse(body.toString("utf8"))
-      const requested = typeof parsed.model === "string" ? parsed.model : ""
-      let resolved = requested
+      requestedModel = typeof parsed.model === "string" ? parsed.model : ""
+      const { base, effort } = splitEffort(requestedModel)
       const aliases = config.modelAliases && typeof config.modelAliases === "object" ? config.modelAliases : {}
-      if (requested && typeof aliases[requested] === "string") resolved = aliases[requested]
+      let resolved = base
+      if (resolved && typeof aliases[requestedModel] === "string") resolved = aliases[requestedModel]
+      else if (resolved && typeof aliases[resolved] === "string") resolved = aliases[resolved]
+
       const known = await bridgeModels()
-      if ((!resolved || (known.length && !known.includes(resolved) && !resolved.includes("/"))) && config.defaultModel) {
-        resolved = config.defaultModel
+      const isKnown = (id) => !known.length || known.includes(id)
+
+      if (resolved && !isKnown(resolved)) {
+        const family = config.allModels ? pickFamilyRoute(resolved) : ""
+        if (family && isKnown(family)) resolved = family
+        else if (config.defaultModel && isKnown(config.defaultModel)) resolved = config.defaultModel
+        else if (config.allModels && isKnown(config.allModelsTarget)) resolved = config.allModelsTarget
       }
-      if (resolved && resolved !== requested) {
-        parsed.model = resolved
-        body = Buffer.from(JSON.stringify(parsed))
+      if (!resolved) {
+        resolved = config.defaultModel || (config.allModels ? config.allModelsTarget : "") || ""
       }
+
+      if (effort) {
+        // The variant is a first-class request here: forward it as the
+        // upstream `reasoning_effort` the bridge already understands.
+        if (parsed.reasoning_effort === undefined) parsed.reasoning_effort = effort
+      }
+      if (resolved && resolved !== base) parsed.model = resolved
+      else if (resolved !== requestedModel && resolved) parsed.model = resolved
+
+      if (parsed.model !== requestedModel) body = Buffer.from(JSON.stringify(parsed))
       model = resolved || ""
+      servedBy = resolved && resolved !== requestedModel ? resolved : ""
     } catch {}
   } else {
     try {
@@ -416,21 +591,44 @@ async function proxyV1(req, res) {
       if (["content-length", "content-encoding", "transfer-encoding", "connection"].includes(k)) continue
       headers[k] = v
     }
-    res.writeHead(status, headers)
-    if (upstreamRes.body) {
-      const reader = upstreamRes.body.getReader()
+    if (servedBy) headers["x-zen-served-by"] = servedBy
+
+    const ctype = String(headers["content-type"] || "")
+    const streaming = /event-stream/i.test(ctype)
+    // JSON responses can be rewritten so the caller sees the model it asked
+    // for (including `#effort` variants) while `zen_served_by` records the
+    // free model that actually answered. SSE is passed through untouched.
+    if (requestedModel && !streaming && /application\/json/i.test(ctype)) {
+      const text = await upstreamRes.text()
+      let out = text
       try {
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          res.write(Buffer.from(value))
+        const parsed = JSON.parse(text)
+        if (parsed && typeof parsed === "object") {
+          if (typeof parsed.model === "string" && parsed.model !== requestedModel) parsed.model = requestedModel
+          if (servedBy) parsed.zen_served_by = servedBy
+          out = JSON.stringify(parsed)
         }
-      } catch {
-        // Either the client disconnected (upstream aborted) or the bridge
-        // dropped the stream; both are already accounted for below.
+      } catch {}
+      headers["content-length"] = Buffer.byteLength(out)
+      res.writeHead(status, headers)
+      res.end(out)
+    } else {
+      res.writeHead(status, headers)
+      if (upstreamRes.body) {
+        const reader = upstreamRes.body.getReader()
+        try {
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            res.write(Buffer.from(value))
+          }
+        } catch {
+          // Either the client disconnected (upstream aborted) or the bridge
+          // dropped the stream; both are already accounted for below.
+        }
       }
+      res.end()
     }
-    res.end()
   } catch (e) {
     if (clientGone) {
       status = 499 // non-standard, "client closed request" — kept out of error stats
@@ -446,6 +644,35 @@ async function proxyV1(req, res) {
     recordRequest({ model: model || "(none)", status, ms: Date.now() - started })
     if (clientGone) log(`${req.method} ${req.url} -> client aborted after ${Date.now() - started}ms`)
     else if (!req.url.includes("/models")) log(`${req.method} ${req.url} -> ${status} ${Date.now() - started}ms ${model}`)
+  }
+}
+
+async function handleModels(req, res) {
+  if (authMisconfigured()) {
+    return sendJson(res, 503, {
+      error: "PROXY_KEY is not set on this public deployment.",
+      code: "proxy_key_missing",
+    })
+  }
+  if (!isAuthorized(req)) {
+    return sendJson(res, 401, { error: { type: "unauthorized", message: "proxy key required" } })
+  }
+  try {
+    const r = await bridgeJson("/v1/models", { signal: AbortSignal.timeout(15000) })
+    const payload = r.json && typeof r.json === "object" ? r.json : { object: "list", data: [] }
+    const entries = Array.isArray(payload.data) ? payload.data : []
+    const data = expandedModelList(entries)
+    return sendJson(res, 200, {
+      ...payload,
+      object: "list",
+      data,
+      all_models: !!config.allModels,
+      effort_variants: config.allModels ? config.effortVariants : [],
+    })
+  } catch (e) {
+    return sendJson(res, 502, {
+      error: { type: "bridge_unreachable", message: String(e?.message || e) },
+    })
   }
 }
 
@@ -476,7 +703,19 @@ const handleRequest = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "127.0.0.1"}`)
   const pathname = url.pathname
 
+  // /v1/models is answered here so all-models mode can expand every entry into
+  // its `#effort` variants. Everything else under /v1/ is proxied verbatim.
+  if (pathname === "/v1/models" && req.method === "GET") return handleModels(req, res)
+
   if (pathname.startsWith("/v1/")) return proxyV1(req, res)
+
+  if (authMisconfigured() && pathname.startsWith("/api/")) {
+    return sendJson(res, 503, {
+      error:
+        "PROXY_KEY is not set. This deployment is publicly reachable, so the dashboard and API are locked until it is configured.",
+      code: "proxy_key_missing",
+    })
+  }
 
   if (pathname === "/api/status") {
     if (!isAuthorized(req)) return sendJson(res, 401, { error: "unauthorized" })
@@ -502,11 +741,17 @@ const handleRequest = async (req, res) => {
         // { fallbackModels: true }) or a string where an array belongs would
         // break /api/status and the model table.
         const next = { ...config }
-        for (const k of ["host", "bridgeUrl", "bridgeDir", "defaultModel", "proxyKey"]) {
+        for (const k of ["host", "bridgeUrl", "bridgeDir", "defaultModel", "proxyKey", "allModelsTarget"]) {
           if (typeof incoming[k] === "string") next[k] = incoming[k]
         }
         if (Number.isFinite(Number(incoming.port)) && Number(incoming.port) > 0) next.port = Number(incoming.port)
         if (typeof incoming.autoStartBridge === "boolean") next.autoStartBridge = incoming.autoStartBridge
+        if (typeof incoming.allModels === "boolean") next.allModels = incoming.allModels
+        if (Array.isArray(incoming.effortVariants)) {
+          next.effortVariants = incoming.effortVariants
+            .map((v) => String(v).toLowerCase())
+            .filter((v) => ["minimal", "low", "medium", "high", "max"].includes(v))
+        }
 
         if (incoming.fallbackModels === true) {
           const ids = await bridgeModels(true)
@@ -528,9 +773,21 @@ const handleRequest = async (req, res) => {
         }
 
         config = next
-        fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n")
-        log("config saved")
-        return sendJson(res, 200, { ok: true, config })
+        let persisted = true
+        try {
+          fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n")
+        } catch {
+          // Read-only filesystem (Vercel): keep the change for this instance
+          // and tell the caller to put it in environment variables instead.
+          persisted = false
+        }
+        log(`config saved${persisted ? "" : " (memory only — filesystem is read-only)"}`)
+        return sendJson(res, 200, {
+          ok: true,
+          config,
+          persisted,
+          note: persisted ? undefined : "Filesystem is read-only here. Set the same values as environment variables (PROXY_KEY, DEFAULT_MODEL, ALL_MODELS, ...) to make them permanent.",
+        })
       } catch (e) {
         return sendJson(res, 400, { error: String(e?.message || e) })
       }
@@ -577,7 +834,9 @@ const handleRequest = async (req, res) => {
     const ids = await bridgeModels(true)
     if (ids.length && config.fallbackModels.length === 0) {
       config.fallbackModels = ids
-      fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n")
+      try {
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n")
+      } catch {}
     }
     log(`sync: ${ids.length} models from bridge catalog`)
     return sendJson(res, 200, { ok: true, models: ids, at: modelCache.at })
@@ -602,6 +861,15 @@ const handleRequest = async (req, res) => {
     if (!isAuthorized(req)) return sendJson(res, 401, { error: "unauthorized" })
     if (req.method === "POST") {
       if (!sameOrigin(req)) return sendJson(res, 403, { error: "cross-origin write rejected" })
+      if (!bridgeIsLocal() || IS_VERCEL) {
+        return sendJson(res, 200, {
+          ok: await bridgeAlive(),
+          restarting: false,
+          remote: true,
+          message: "The bridge runs on another host; restart it there (or restart its Bun process).",
+          state: bridgeState,
+        })
+      }
       const ok = await ensureBridge()
       return sendJson(res, 200, { ok, restarting: !ok, state: bridgeState })
     }
@@ -621,11 +889,26 @@ const handleRequest = async (req, res) => {
 
   if (pathname === "/api/opencode/status") {
     if (!isAuthorized(req)) return sendJson(res, 401, { error: "unauthorized" })
+    if (IS_VERCEL) {
+      return sendJson(res, 200, {
+        url: null,
+        raw: "The OpenCode CLI lives on your machine; this deployment cannot see it. Pair locally instead.",
+        local: false,
+      })
+    }
     return sendJson(res, 200, await opencodeStatus())
   }
 
   if (pathname === "/api/opencode/pair") {
     if (!isAuthorized(req)) return sendJson(res, 401, { error: "unauthorized" })
+    if (IS_VERCEL) {
+      return sendJson(res, 200, {
+        link: null,
+        qr: null,
+        raw: "Pairing only works on the machine running OpenCode. Run `node server.mjs` locally, or run `opencode pair` in a terminal.",
+        local: false,
+      })
+    }
     const pair = await opencodePair()
     if (pair.link) log("opencode pair link generated")
     return sendJson(res, 200, pair)
@@ -633,11 +916,11 @@ const handleRequest = async (req, res) => {
 
   if (pathname === "/" || pathname === "/index.html") {
     try {
-      const html = fs.readFileSync(path.join(__dirname, "public", "index.html"))
+      const html = fs.readFileSync(path.join(__dirname, "index.html"))
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" })
       return res.end(html)
     } catch {
-      return sendJson(res, 500, { error: "public/index.html missing" })
+      return sendJson(res, 500, { error: "index.html missing" })
     }
   }
 
@@ -649,12 +932,14 @@ const handleRequest = async (req, res) => {
     })
   }
 
-  // static assets (if any are added later)
+  // Static assets live under /assets. Never serve the repo root: server.mjs,
+  // bridge/ and zen-proxy.json sit there and must stay private.
+  if (!pathname.startsWith("/assets/")) return sendJson(res, 404, { error: "not found" })
   if (pathname.includes("..") || pathname.includes("\0")) return sendJson(res, 400, { error: "bad path" })
-  const safe = path.normalize(pathname).replace(/^([/\\])+/, "")
-  const publicDir = path.join(__dirname, "public")
-  const file = path.join(publicDir, safe)
-  if (file.startsWith(publicDir + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) {
+  const safe = path.normalize(pathname.slice(1))
+  const assetsDir = path.join(__dirname, "assets")
+  const file = path.join(__dirname, safe)
+  if (file.startsWith(assetsDir + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) {
     // Revalidate with an ETag keyed on size + mtime so an edited asset is
     // picked up on a normal refresh instead of a stale cached copy.
     const st = fs.statSync(file)
@@ -680,6 +965,11 @@ const server = http.createServer((req, res) => {
   })
 })
 
+// Vercel (and any other serverless host) imports this module and calls the
+// handler per request; it must not open a listener or spawn a bridge.
+export { handleRequest }
+export default handleRequest
+
 function guessType(file) {
   const ext = path.extname(file).toLowerCase()
   return {
@@ -693,24 +983,26 @@ function guessType(file) {
   }[ext] || "application/octet-stream"
 }
 
-server.listen(config.port, config.host, async () => {
-  log(`zen-proxy dashboard on http://${config.host}:${config.port}`)
-  log(`bridge backend ${config.bridgeUrl}`)
-  await ensureBridge()
-  startWatchdog()
-})
+if (!IS_VERCEL) {
+  server.listen(config.port, config.host, async () => {
+    log(`zen-proxy dashboard on http://${config.host}:${config.port}`)
+    log(`bridge backend ${config.bridgeUrl}${bridgeIsLocal() ? "" : " (remote)"}`)
+    if (authMisconfigured()) log("warning: no PROXY_KEY and this is a non-loopback bind — /api and /v1 are locked")
+    await ensureBridge()
+    startWatchdog()
+  })
 
-process.on("SIGTERM", () => {
-  log("shutting down")
-  server.close(() => process.exit(0))
-})
+  process.on("SIGTERM", () => {
+    log("shutting down")
+    server.close(() => process.exit(0))
+  })
+  process.on("SIGINT", () => {
+    log("shutting down")
+    server.close(() => process.exit(0))
+  })
+}
 
 // A background failure (bridge watchdog, config write, stream) must not take
 // the dashboard down with it.
 process.on("unhandledRejection", (e) => log(`unhandled rejection: ${e?.message || e}`))
 process.on("uncaughtException", (e) => log(`uncaught exception: ${e?.message || e}`))
-
-process.on("SIGINT", () => {
-  log("shutting down")
-  server.close(() => process.exit(0))
-})

@@ -163,13 +163,13 @@ function setBusy(busy) {
 
 function renderStatus(state) {
   $("mode").textContent =
-    state.mode === "pool" ? "Pool aktif" : state.mode === "proxy" ? "Lewat proxy" : "Langsung (IP asli)";
+    state.mode === "pool" ? "Pool active" : state.mode === "proxy" ? "Via proxy" : "Direct (real IP)";
   $("mode").dataset.mode = state.mode === "direct" ? "direct" : "proxy";
-  $("host").textContent = state.proxy || "tidak ada proxy";
+  $("host").textContent = state.proxy || "no proxy";
   const notes = [];
-  if (state.locked) notes.push("Dikunci " + state.source + ": ubah variabel environment lalu restart.");
-  if (state.hasCredentials) notes.push("Kredensial tersimpan, tidak ditampilkan.");
-  if (state.source === "file") notes.push("Disimpan di " + state.configPath);
+  if (state.locked) notes.push("Locked by " + state.source + ": change the environment variable and restart.");
+  if (state.hasCredentials) notes.push("Credentials stored but not displayed.");
+  if (state.source === "file") notes.push("Saved in " + state.configPath);
   if (state.error) notes.push(state.error);
   $("note").textContent = notes.join(" ");
   $("note").hidden = notes.length === 0;
@@ -203,7 +203,7 @@ function renderPool(pool) {
       badge.className = "state";
       badge.dataset.state = entry.state;
       badge.textContent =
-        entry.state === "ready" ? "siap" : entry.state === "cooling" ? "cooldown" : "nonaktif";
+        entry.state === "ready" ? "ready" : entry.state === "cooling" ? "cooldown" : "inactive";
 
       li.append(name, addr, badge);
 
@@ -211,11 +211,11 @@ function renderPool(pool) {
       detail.className = "detail";
       const bits = [];
       if (entry.state === "cooling" && entry.cooldownMsLeft) {
-        bits.push("pulih dalam " + Math.ceil(entry.cooldownMsLeft / 1000) + " dtk");
+        bits.push("recovers in " + Math.ceil(entry.cooldownMsLeft / 1000) + "s");
       }
-      if (entry.failures) bits.push(entry.failures + " kegagalan");
+      if (entry.failures) bits.push(entry.failures + " failures");
       if (entry.lastError) bits.push(entry.lastError);
-      if (entry.weight !== 1) bits.push("bobot " + entry.weight);
+      if (entry.weight !== 1) bits.push("weight " + entry.weight);
       if (bits.length) detail.textContent = bits.join(" · ");
       if (bits.length) li.append(detail);
 
@@ -282,7 +282,7 @@ async function load() {
     $("pool-save").disabled = locked;
     $("pool-clear").disabled = locked;
   } catch (err) {
-    showReport([line("Gagal memuat status: " + err.message, "bad")]);
+    showReport([line("Could not load status: " + err.message, "bad")]);
   }
 }
 
@@ -306,7 +306,7 @@ async function save() {
     const state = await send("/api/proxy", { url: value });
     renderStatus(state);
     urlInput.value = "";
-    showReport([line(state.mode === "proxy" ? "Proxy aktif. Request berikutnya memakai egress ini." : "Proxy dimatikan. Egress kembali langsung.", "ok")]);
+    showReport([line(state.mode === "proxy" ? "Proxy active. The next requests use this egress." : "Proxy disabled. Egress is direct again.", "ok")]);
   } catch (err) {
     showReport([line(err.message, "bad")]);
   }
@@ -321,20 +321,20 @@ form.addEventListener("submit", (event) => {
 testBtn.addEventListener("click", async () => {
   const target = urlInput.value.trim();
   if (!target) {
-    showReport([line("Isi URL proxy dulu untuk diuji.", "bad")]);
+    showReport([line("Enter a proxy URL to test first.", "bad")]);
     return;
   }
-  showReport([line("Menguji " + target + " …")]);
+  showReport([line("Testing " + target + " …")]);
   try {
     const r = await send("/api/proxy/test", { url: target });
     const nodes = [];
     if (r.ok) {
-      nodes.push(line("Proxy menjawab upstream (HTTP " + r.apiStatus + ") dalam " + r.latencyMs + " ms.", "ok"));
-      if (r.exitIp) nodes.push(line("IP keluar: " + r.exitIp, "mono"));
-      else nodes.push(line("IP keluar tidak terbaca: " + (r.exitError || "tidak diketahui"), "bad"));
+      nodes.push(line("Proxy reached upstream (HTTP " + r.apiStatus + ") in " + r.latencyMs + " ms.", "ok"));
+      if (r.exitIp) nodes.push(line("Exit IP: " + r.exitIp, "mono"));
+      else nodes.push(line("Exit IP unreadable: " + (r.exitError || "unknown"), "bad"));
     } else {
-      nodes.push(line(r.error || "Uji proxy gagal.", "bad"));
-      if (r.exitIp) nodes.push(line("IP keluar: " + r.exitIp, "mono"));
+      nodes.push(line(r.error || "Proxy test failed.", "bad"));
+      if (r.exitIp) nodes.push(line("Exit IP: " + r.exitIp, "mono"));
     }
     showReport(nodes);
   } catch (err) {
@@ -347,7 +347,7 @@ directBtn.addEventListener("click", async () => {
     const state = await send("/api/proxy", { url: "" });
     renderStatus(state);
     urlInput.value = "";
-    showReport([line("Proxy dimatikan. Egress kembali langsung dari IP mesin ini.", "ok")]);
+    showReport([line("Proxy disabled. Egress is direct from this machine's IP again.", "ok")]);
   } catch (err) {
     showReport([line(err.message, "bad")]);
   }
@@ -362,7 +362,7 @@ function showPoolReport(nodes) {
 $("pool-save").addEventListener("click", async () => {
   const entries = readPoolInput();
   if (entries.length === 0) {
-    showPoolReport([line("Isi minimal satu proxy.", "bad")]);
+    showPoolReport([line("Add at least one proxy.", "bad")]);
     return;
   }
   try {
@@ -373,7 +373,7 @@ $("pool-save").addEventListener("click", async () => {
     renderStatus(state);
     showPoolReport([
       line(
-        "Pool aktif: " + state.pool.enabled + "/" + state.pool.size + " entri, strategi " + state.pool.strategy + ".",
+        "Pool active: " + state.pool.enabled + "/" + state.pool.size + " entries, strategy " + state.pool.strategy + ".",
         "ok"
       ),
     ]);
@@ -385,20 +385,20 @@ $("pool-save").addEventListener("click", async () => {
 $("pool-test").addEventListener("click", async () => {
   const entries = readPoolInput();
   if (entries.length === 0) {
-    showPoolReport([line("Isi minimal satu proxy untuk diuji.", "bad")]);
+    showPoolReport([line("Add at least one proxy to test.", "bad")]);
     return;
   }
-  showPoolReport([line("Menguji " + entries.length + " proxy …")]);
+  showPoolReport([line("Testing " + entries.length + " prox" + (entries.length === 1 ? "y" : "ies") + " …")]);
   try {
     const r = await send("/api/proxy/test", { entries });
     const nodes = (r.entries || []).map((entry) => {
       const head = (entry.label || entry.host || entry.id) + " — ";
       if (entry.ok) {
-        return line(head + "ok, " + entry.latencyMs + " ms, IP " + (entry.exitIp || "tidak terbaca"), "ok");
+        return line(head + "ok, " + entry.latencyMs + " ms, IP " + (entry.exitIp || "unreadable"), "ok");
       }
-      return line(head + (entry.error || "gagal"), "bad");
+      return line(head + (entry.error || "failed"), "bad");
     });
-    showPoolReport(nodes.length ? nodes : [line("Tidak ada hasil.", "bad")]);
+    showPoolReport(nodes.length ? nodes : [line("No results.", "bad")]);
   } catch (err) {
     showPoolReport([line(err.message, "bad")]);
   }
@@ -409,7 +409,7 @@ $("pool-clear").addEventListener("click", async () => {
     const state = await send("/api/proxy", { entries: [] });
     renderStatus(state);
     $("pool-entries").value = "";
-    showPoolReport([line("Pool dikosongkan. Egress kembali ke proxy tunggal atau langsung.", "ok")]);
+    showPoolReport([line("Pool cleared. Egress falls back to the single proxy, or direct.", "ok")]);
   } catch (err) {
     showPoolReport([line(err.message, "bad")]);
   }
@@ -430,7 +430,7 @@ function escapeHtml(value) {
 function renderPanel(description, { version = "", port = "" } = {}) {
   const state = description || {};
   return `<!doctype html>
-<html lang="id">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -442,74 +442,74 @@ function renderPanel(description, { version = "", port = "" } = {}) {
 <main>
   <header>
     <h1>Proxy egress</h1>
-    <p class="sub">Arahkan semua koneksi keluar bridge lewat proxy HTTP, supaya upstream tidak melihat IP mesin ini.</p>
+    <p class="sub">Send every outbound bridge connection through an HTTP proxy, so upstream never sees this machine's IP.</p>
   </header>
 
   <section aria-labelledby="status-title">
-    <h2 id="status-title">Status sekarang</h2>
+    <h2 id="status-title">Current status</h2>
     <div class="status">
-      <span class="mode" id="mode">${escapeHtml(state.mode === "pool" ? "Pool aktif" : state.mode === "proxy" ? "Lewat proxy" : "Langsung (IP asli)")}</span>
-      <span class="host" id="host">${escapeHtml(state.proxy || "tidak ada proxy")}</span>
+      <span class="mode" id="mode">${escapeHtml(state.mode === "pool" ? "Pool active" : state.mode === "proxy" ? "Via proxy" : "Direct (real IP)")}</span>
+      <span class="host" id="host">${escapeHtml(state.proxy || "no proxy")}</span>
       <span class="note" id="note" hidden></span>
     </div>
     <ul class="pool-list" id="pool-list" hidden></ul>
   </section>
 
   <section aria-labelledby="pool-title">
-    <h2 id="pool-title">Pool egress</h2>
-    <p class="hint">Satu URL per baris. Tambahkan label dengan <code>nama=url</code>. Pool dipakai bergantian; entri yang ditolak upstream masuk cooldown dan dilewati sampai pulih.</p>
+    <h2 id="pool-title">Egress pool</h2>
+    <p class="hint">One URL per line. Add a label with <code>name=url</code>. The pool is used in rotation; entries a rejected request was routed through go on cooldown and are skipped until they recover.</p>
     <div class="field">
-      <label for="pool-entries">Daftar proxy</label>
+      <label for="pool-entries">Proxy list</label>
       <textarea id="pool-entries" rows="6" spellcheck="false" placeholder="med1=http://10.0.0.1:8888&#10;med2=http://10.0.0.2:8888"></textarea>
     </div>
     <div class="field">
-      <label for="pool-strategy">Strategi</label>
+      <label for="pool-strategy">Strategy</label>
       <select id="pool-strategy">
-        <option value="priority-failover">Prioritas + failover (utamakan urutan atas, balik otomatis)</option>
-        <option value="round-robin">Round-robin (sebar rata)</option>
-        <option value="failover">Failover (pakai yang pertama sampai ditolak)</option>
-        <option value="random">Acak berbobot</option>
+        <option value="priority-failover">Priority + failover (prefer top order, fall back automatically)</option>
+        <option value="round-robin">Round-robin (spread evenly)</option>
+        <option value="failover">Failover (use the first until it is refused)</option>
+        <option value="random">Weighted random</option>
       </select>
     </div>
     <div class="actions">
-      <button type="button" class="primary" id="pool-save">Simpan pool</button>
-      <button type="button" id="pool-test">Uji semua</button>
-      <button type="button" id="pool-clear">Kosongkan pool</button>
+      <button type="button" class="primary" id="pool-save">Save pool</button>
+      <button type="button" id="pool-test">Test all</button>
+      <button type="button" id="pool-clear">Clear pool</button>
     </div>
     <div class="report" id="pool-report" role="status" aria-live="polite" hidden></div>
   </section>
 
   <section aria-labelledby="form-title">
-    <h2 id="form-title">Atur proxy</h2>
+    <h2 id="form-title">Configure proxy</h2>
     <form id="form" novalidate>
       <div class="field">
-        <label for="proxy-url">URL proxy</label>
+        <label for="proxy-url">Proxy URL</label>
         <input id="proxy-url" name="proxy-url" type="text" inputmode="url" autocomplete="off"
                spellcheck="false" placeholder="http://user:pass@host:8080"
                aria-describedby="url-hint">
-        <p class="hint" id="url-hint">Format <code>http://[user:pass@]host:port</code>. Hanya HTTP/HTTPS (tunnel CONNECT). Kosongkan lalu simpan untuk kembali langsung.</p>
+        <p class="hint" id="url-hint">Format <code>http://[user:pass@]host:port</code>. HTTP/HTTPS only (CONNECT tunnel). Leave empty and save to go back to direct.</p>
       </div>
       <div class="actions">
-        <button type="button" class="primary" id="save">Simpan dan pakai</button>
-        <button type="button" id="test">Uji koneksi</button>
-        <button type="button" id="direct">Matikan proxy</button>
+        <button type="button" class="primary" id="save">Save and use</button>
+        <button type="button" id="test">Test connection</button>
+        <button type="button" id="direct">Turn off proxy</button>
       </div>
       <div class="report" id="report" role="status" aria-live="polite" hidden></div>
     </form>
   </section>
 
   <section aria-labelledby="endpoint-title">
-    <h2 id="endpoint-title">Endpoint klien</h2>
+    <h2 id="endpoint-title">Client endpoint</h2>
     <dl>
       <dt>Base URL</dt><dd>http://127.0.0.1:${escapeHtml(port || "20129")}/v1</dd>
       <dt>API key</dt><dd>public</dd>
-      <dt>Versi</dt><dd>${escapeHtml(version || "")}</dd>
+      <dt>Version</dt><dd>${escapeHtml(version || "")}</dd>
       <dt>Health</dt><dd><a href="/health">/health</a></dd>
     </dl>
   </section>
 
   <footer>
-    Proxy berlaku untuk inference, discovery model, sinkronisasi identity, dan cek update. Perubahan langsung dipakai request berikutnya, tanpa restart.
+    The proxy applies to inference, model discovery, identity sync and update checks. Changes take effect on the next request, no restart needed.
   </footer>
 </main>
 <script>${SCRIPT}</script>

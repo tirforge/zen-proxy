@@ -1,5 +1,8 @@
 node_modules/
 .mimocode/
+.vercel/
+.env
+.env.local
 zen-proxy.json
 free-models.json
 *.log

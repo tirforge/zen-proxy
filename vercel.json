@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/index.mjs": {
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  },
+  "rewrites": [
+    { "source": "/v1/:path*", "destination": "/api/index?__zp=/v1/:path*" },
+    { "source": "/api/:path*", "destination": "/api/index?__zp=/api/:path*" },
+    { "source": "/health", "destination": "/api/index?__zp=/health" }
+  ]
+}

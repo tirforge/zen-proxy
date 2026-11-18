@@ -1,7 +1,7 @@
 {
   "name": "zen-proxy",
-  "version": "2.0.0",
-  "description": "zen-proxy dashboard + opencode-free-bridge backend: free OpenCode Zen models for any agent, with a web UI, egress panel and OpenCode pair link",
+  "version": "2.1.0",
+  "description": "zen-proxy dashboard + opencode-free-bridge backend: free OpenCode Zen models for any agent, with all-models mode, an English egress panel and OpenCode pairing",
   "type": "module",
   "main": "server.mjs",
   "bin": {
