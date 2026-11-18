@@ -18,6 +18,37 @@ import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+// Minimal .env loader (no dependency): `node server.mjs` reads a local `.env`
+// next to server.mjs, without ever overriding real environment variables —
+// which is also what Vercel/`docker run -e` set. Kept tiny on purpose.
+function loadDotEnv(file) {
+  let raw = ""
+  try {
+    raw = fs.readFileSync(file, "utf8")
+  } catch {
+    return
+  }
+  for (const line of raw.split(/\r?\n/)) {
+    const text = line.trim()
+    if (!text || text.startsWith("#")) continue
+    const eq = text.indexOf("=")
+    if (eq < 1) continue
+    const name = text.slice(0, eq).trim()
+    if (process.env[name] !== undefined) continue
+    let value = text.slice(eq + 1).trim()
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1)
+    }
+    process.env[name] = value
+  }
+}
+
+loadDotEnv(path.join(__dirname, ".env"))
+
 const CONFIG_PATH = process.env.ZEN_PROXY_CONFIG || path.join(__dirname, "zen-proxy.json")
 const IS_VERCEL = !!process.env.VERCEL
 
@@ -107,10 +138,13 @@ function envObject() {
 const ENV = envObject()
 
 function buildConfig(stored) {
-  const has = (k) => stored && typeof stored === "object" && Object.prototype.hasOwnProperty.call(stored, k)
-  const next = { ...DEFAULTS, ...(stored && typeof stored === "object" ? stored : {}) }
+  const saved = stored && typeof stored === "object" ? stored : null
+  // A dashboard save is recorded with configUpdatedAt. Until one exists the
+  // env vars are the config; after it the website owns the behaviour keys.
+  const siteSaved = !!(saved && Number(saved.configUpdatedAt) > 0)
+  const next = { ...DEFAULTS, ...(saved || {}) }
   for (const [key, value] of Object.entries(ENV)) {
-    if (INFRA_KEYS.has(key) || !has(key)) next[key] = value
+    if (INFRA_KEYS.has(key) || !siteSaved) next[key] = value
   }
   return next
 }
@@ -859,6 +893,7 @@ const handleRequest = async (req, res) => {
         }
 
         config = next
+        config.configUpdatedAt = Date.now()
         const persisted = await persistConfig()
         log(`config saved (${persisted})`)
         return sendJson(res, 200, {

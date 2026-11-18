@@ -177,8 +177,14 @@ The original zen-proxy variable names are kept. Precedence is deliberate:
   `AUTO_START_BRIDGE`) always comes from the environment, so a stored config can
   never expose a public deployment;
 - **behaviour** (`DEFAULT_MODEL`, `ALL_MODELS`, `ALL_MODELS_TARGET`,
-  `FALLBACK_MODELS`, `MODEL_ALIASES`, `RESPONSES_MODELS`) is only a default —
-  once the value exists in the stored config, the dashboard wins.
+  `FALLBACK_MODELS`, `MODEL_ALIASES`, `RESPONSES_MODELS`) comes from the
+  environment until the first dashboard save. That save is recorded as
+  `configUpdatedAt` in the stored config, and from then on the website wins —
+  which is what the settings page tells you.
+
+You can put the variables in a local `.env` next to `server.mjs`; it is read on
+startup without overriding real environment variables (so Vercel / `docker -e`
+always take precedence).
 
 | Variable | Maps to |
 |---|---|
