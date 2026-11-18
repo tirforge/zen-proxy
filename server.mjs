@@ -288,21 +288,53 @@ async function buildStatus() {
 // ---------------------------------------------------------------- /v1 proxy
 
 async function proxyV1(req, res) {
+  if (!isAuthorized(req)) {
+    return sendJson(res, 401, { error: { type: "unauthorized", message: "proxy key required" } })
+  }
   const target = config.bridgeUrl.replace(/\/$/, "") + req.url
   const started = Date.now()
   const chunks = []
   for await (const c of req) chunks.push(c)
-  const body = chunks.length ? Buffer.concat(chunks) : undefined
+  let body = chunks.length ? Buffer.concat(chunks) : undefined
   let model = ""
-  try {
-    if (body && /json/.test(req.headers["content-type"] || "")) model = JSON.parse(body.toString("utf8")).model || ""
-  } catch {}
+
+  // Apply model routing from config: aliases first, then defaultModel for an
+  // unknown/absent id. Without this the dashboard's alias + default settings
+  // were written but never used, and an alias upstream rejects 400s.
+  if (body && /json/.test(req.headers["content-type"] || "") && /\/v1\/(chat\/completions|responses|messages)$/.test(req.url.split("?")[0])) {
+    try {
+      const parsed = JSON.parse(body.toString("utf8"))
+      const requested = typeof parsed.model === "string" ? parsed.model : ""
+      let resolved = requested
+      const aliases = config.modelAliases && typeof config.modelAliases === "object" ? config.modelAliases : {}
+      if (requested && typeof aliases[requested] === "string") resolved = aliases[requested]
+      const known = await bridgeModels()
+      if ((!resolved || (known.length && !known.includes(resolved) && !resolved.includes("/"))) && config.defaultModel) {
+        resolved = config.defaultModel
+      }
+      if (resolved && resolved !== requested) {
+        parsed.model = resolved
+        body = Buffer.from(JSON.stringify(parsed))
+      }
+      model = resolved || ""
+    } catch {}
+  } else {
+    try {
+      if (body) model = JSON.parse(body.toString("utf8")).model || ""
+    } catch {}
+  }
 
   let status = 502
   try {
+    const fwdHeaders = { ...req.headers }
+    // The body may have been rewritten for model routing, so a stale
+    // content-length (and any transfer framing) must not be forwarded.
+    delete fwdHeaders["content-length"]
+    delete fwdHeaders["transfer-encoding"]
+    fwdHeaders.host = new URL(config.bridgeUrl).host
     const upstreamRes = await fetch(target, {
       method: req.method,
-      headers: { ...req.headers, host: new URL(config.bridgeUrl).host },
+      headers: fwdHeaders,
       body: body && req.method !== "GET" && req.method !== "HEAD" ? body : undefined,
     })
     status = upstreamRes.status
@@ -331,6 +363,10 @@ async function proxyV1(req, res) {
     counters.total++
     if (status >= 400) counters.errors++
     counters.times.push(Date.now())
+    if (counters.times.length > 5000) {
+      const cutoff = Date.now() - 5 * 60 * 1000
+      counters.times = counters.times.filter((t) => t >= cutoff)
+    }
     recent.push({ at: Date.now(), model: model || "(none)", status, ms, count: 1 })
     if (recent.length > 100) recent.shift()
     if (!req.url.includes("/models")) log(`${req.method} ${req.url} -> ${status} ${ms}ms ${model}`)
@@ -361,13 +397,42 @@ const server = http.createServer(async (req, res) => {
       if (!sameOrigin(req)) return sendJson(res, 403, { error: "cross-origin write rejected" })
       try {
         const incoming = JSON.parse(await readBody(req))
-        if (incoming && typeof incoming === "object") {
-          const merged = { ...config, ...incoming }
-          delete merged.__proto__
-          config = merged
-          fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n")
-          log("config saved")
+        if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) {
+          return sendJson(res, 400, { error: "config must be a JSON object" })
         }
+        // Whitelist + type-check every writable key. A stray value used to be
+        // merged verbatim, so the dashboard's "restore" action (which posts
+        // { fallbackModels: true }) or a string where an array belongs would
+        // break /api/status and the model table.
+        const next = { ...config }
+        for (const k of ["host", "bridgeUrl", "bridgeDir", "defaultModel", "proxyKey"]) {
+          if (typeof incoming[k] === "string") next[k] = incoming[k]
+        }
+        if (Number.isFinite(Number(incoming.port)) && Number(incoming.port) > 0) next.port = Number(incoming.port)
+        if (typeof incoming.autoStartBridge === "boolean") next.autoStartBridge = incoming.autoStartBridge
+
+        if (incoming.fallbackModels === true) {
+          const ids = await bridgeModels(true)
+          next.fallbackModels = ids
+        } else if (Array.isArray(incoming.fallbackModels)) {
+          next.fallbackModels = incoming.fallbackModels.filter((m) => typeof m === "string" && m)
+        }
+
+        if (incoming.modelAliases && typeof incoming.modelAliases === "object" && !Array.isArray(incoming.modelAliases)) {
+          const aliases = {}
+          for (const [from, to] of Object.entries(incoming.modelAliases)) {
+            if (typeof from === "string" && typeof to === "string" && to) aliases[from] = to
+          }
+          next.modelAliases = aliases
+        }
+
+        if (Array.isArray(incoming.responsesModels)) {
+          next.responsesModels = incoming.responsesModels.filter((p) => typeof p === "string")
+        }
+
+        config = next
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n")
+        log("config saved")
         return sendJson(res, 200, { ok: true, config })
       } catch (e) {
         return sendJson(res, 400, { error: String(e?.message || e) })
@@ -480,9 +545,11 @@ const server = http.createServer(async (req, res) => {
   }
 
   // static assets (if any are added later)
+  if (pathname.includes("..") || pathname.includes("\0")) return sendJson(res, 400, { error: "bad path" })
   const safe = path.normalize(pathname).replace(/^([/\\])+/, "")
-  const file = path.join(__dirname, "public", safe)
-  if (file.startsWith(path.join(__dirname, "public")) && fs.existsSync(file) && fs.statSync(file).isFile()) {
+  const publicDir = path.join(__dirname, "public")
+  const file = path.join(publicDir, safe)
+  if (file.startsWith(publicDir + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) {
     res.writeHead(200, { "content-type": guessType(file) })
     return res.end(fs.readFileSync(file))
   }
