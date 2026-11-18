@@ -310,7 +310,11 @@ function sameOrigin(req) {
 
 async function bridgeJson(pathname, init) {
   const url = config.bridgeUrl.replace(/\/$/, "") + pathname
-  const r = await fetch(url, init)
+  // The bridge may sit behind an auth shim (the VPS deployment does), so every
+  // internal call carries the same key the /v1 clients use.
+  const headers = { ...(init && init.headers ? init.headers : {}) }
+  if (config.proxyKey) headers.authorization = `Bearer ${config.proxyKey}`
+  const r = await fetch(url, { ...init, headers })
   const text = await r.text()
   let json = null
   try { json = JSON.parse(text) } catch {}

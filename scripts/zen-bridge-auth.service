@@ -1,0 +1,21 @@
+[Unit]
+Description=Auth shim in front of the OpenCode free bridge
+After=network-online.target zen-bridge.service
+Wants=network-online.target zen-bridge.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/zen-bridge
+EnvironmentFile=/etc/zen-bridge.env
+Environment=AUTH_HOST=0.0.0.0
+Environment=AUTH_PORT=20130
+Environment=BRIDGE_TARGET=http://127.0.0.1:20129
+ExecStart=/home/ubuntu/.bun/bin/bun /home/ubuntu/zen-bridge/bridge-auth.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
